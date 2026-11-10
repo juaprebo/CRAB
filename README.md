@@ -27,14 +27,15 @@ You need Rust 1.89 or newer and the ALSA development headers.
 
 Then build and install it to `~/.local/bin`:
 
-    ./install.sh
+    make
+    make install
 
 Or only build it and run it from the repository:
 
-    ./build.sh
+    make
     ./target/release/crab ~/Music
 
-Spotify support is a Cargo feature that is on by default. Pass `--no-spotify` to either script to leave it out. `PREFIX` changes the install location (for example `sudo PREFIX=/usr/local ./install.sh`) and `./install.sh --uninstall` removes the binary. The scripts wrap plain `cargo build --release --locked`, which works too.
+Spotify support is a Cargo feature that is on by default. Pass `SPOTIFY=0` to `make` to leave it out. `PREFIX` changes the install location, so a system-wide install is `make && sudo make install PREFIX=/usr/local`, and `make uninstall` removes the binary. `make test` runs the tests and `make help` lists the targets. `make` wraps plain `cargo build --release --locked`, which works too.
 
 ## Usage
 
