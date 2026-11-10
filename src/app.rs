@@ -991,7 +991,8 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Esc => self.cancel_loading(),
             KeyCode::Char('o') => self.open_picker(),
             KeyCode::Char('/') if self.tab == Tab::Radio => self.open_finder(),
             KeyCode::Char('x') if self.tab == Tab::Radio => self.remove_station(),
@@ -1027,6 +1028,16 @@ impl App {
                 self.set_status(label, false);
             }
             _ => {}
+        }
+    }
+
+    fn cancel_loading(&mut self) {
+        if self.loading && matches!(self.active, Active::Radio(_)) {
+            self.generation += 1;
+            self.engine.stop();
+            self.active = Active::None;
+            self.loading = false;
+            self.set_status("Connection cancelled", false);
         }
     }
 

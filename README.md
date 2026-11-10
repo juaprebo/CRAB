@@ -61,6 +61,7 @@ Without arguments CRAB opens the folders you used last time, or `~/Music` the fi
 | `r` | reload the configuration |
 | Tab, `1` `2` `3` | switch between Library, Radio and Spotify |
 | `q` | quit |
+| Esc | cancel what is in progress (a station that is connecting, a dialog); it never quits |
 
 ### Folder browser
 
