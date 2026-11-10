@@ -2,6 +2,7 @@ use crate::app::{Active, App, SpotifyStatus, Tab};
 use crate::art::{self, Art, Cell};
 use crate::config::Config;
 use crate::config::VisualizerConfig;
+use crate::finder::{Finder, Focus};
 use crate::picker::Picker;
 use crate::spotify;
 use crate::theme::{Theme, from_hsl, to_color, to_hex};
@@ -131,6 +132,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_footer(frame, footer, app, &theme);
     if let Some(picker) = app.picker.as_mut() {
         draw_picker(frame, area, picker, &theme);
+    }
+    if let Some(finder) = app.finder.as_mut() {
+        draw_finder(frame, area, finder, &theme);
     }
     if let Some(picker) = app.theme_picker.as_mut() {
         draw_theme_picker(frame, area, picker, &app.themes, &app.config, &theme);
@@ -604,6 +608,129 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &mut Picker, theme: &Theme
     frame.render_widget(Paragraph::new(help).wrap(Wrap { trim: true }), help_area);
 }
 
+fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(width.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn field_line(label: &str, value: &str, focused: bool, theme: &Theme) -> Line<'static> {
+    let label_style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.dim)
+    };
+    let mut spans = vec![
+        Span::styled(format!("{label:<9}"), label_style),
+        Span::styled(value.to_string(), Style::default().fg(theme.text)),
+    ];
+    if focused {
+        spans.push(Span::styled("█", Style::default().fg(theme.accent)));
+    }
+    Line::from(spans)
+}
+
+fn draw_finder(frame: &mut Frame, area: Rect, finder: &mut Finder, theme: &Theme) {
+    let width = area.width.saturating_sub(4).min(78);
+    let height = area.height.saturating_sub(2).min(24);
+    if width < 36 || height < 10 {
+        return;
+    }
+    let rect = centered(area, width, height);
+    let inner = overlay_block(frame, rect, theme, "Find stations".to_string());
+    let [name_area, country_area, message_area, list_area, help_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(2),
+    ])
+    .areas(inner);
+
+    frame.render_widget(
+        Paragraph::new(field_line(
+            "Name",
+            &finder.name,
+            finder.focus == Focus::Name,
+            theme,
+        )),
+        name_area,
+    );
+    frame.render_widget(
+        Paragraph::new(field_line(
+            "Country",
+            &finder.country,
+            finder.focus == Focus::Country,
+            theme,
+        )),
+        country_area,
+    );
+
+    let message_color = if finder.message_is_error {
+        theme.error
+    } else {
+        theme.secondary
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            truncate(&finder.message, inner.width as usize),
+            Style::default().fg(message_color),
+        )),
+        message_area,
+    );
+
+    let row_width = list_area.width as usize;
+    let items: Vec<ListItem> = finder
+        .results
+        .iter()
+        .map(|found| {
+            let bitrate = if found.bitrate > 0 {
+                format!(" {}k", found.bitrate)
+            } else {
+                String::new()
+            };
+            let info = format!("{} {}{}", found.country, found.codec, bitrate)
+                .trim()
+                .to_string();
+            let name_width = row_width.saturating_sub(info.chars().count() + 3);
+            let name = truncate(&found.station.name, name_width);
+            let pad = row_width
+                .saturating_sub(name.chars().count() + info.chars().count() + 2)
+                .max(1);
+            ListItem::new(Line::from(vec![
+                Span::styled(name, Style::default().fg(theme.text)),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(info, Style::default().fg(theme.dim)),
+            ]))
+        })
+        .collect();
+    let highlight_style = if finder.focus == Focus::Results {
+        highlight(theme)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(highlight_style),
+        list_area,
+        &mut finder.state,
+    );
+
+    let help = match finder.focus {
+        Focus::Results => "↑↓ select  ⏎ save and play  / new search  tab fields  esc close",
+        _ => "type to search  ⏎ search  ↓ results  tab next field  esc close",
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(help, Style::default().fg(theme.dim)))
+            .wrap(Wrap { trim: true }),
+        help_area,
+    );
+}
+
 fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let wide = area.width >= 72;
     let [logo, tabs, theme_name] = Layout::horizontal([
@@ -976,7 +1103,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         );
         return;
     }
-    let keys = [
+    let mut keys = vec![
         ("↑↓", "select"),
         ("⏎", "play"),
         ("space", "pause"),
@@ -986,10 +1113,12 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ("m", "mute"),
         ("s", if app.shuffle { "shuffle on" } else { "shuffle" }),
         ("o", "folder"),
-        ("t", "theme"),
-        ("tab", "switch"),
-        ("q", "quit"),
     ];
+    if app.tab == Tab::Radio {
+        keys.insert(2, ("/", "find"));
+        keys.insert(3, ("x", "remove"));
+    }
+    keys.extend([("t", "theme"), ("tab", "switch"), ("q", "quit")]);
     let item_width = |key: &str, label: &str| key.chars().count() + label.chars().count() + 3;
     let (quit_key, quit_label) = keys[keys.len() - 1];
     let mut budget = (area.width as usize).saturating_sub(1 + item_width(quit_key, quit_label));
@@ -1094,6 +1223,39 @@ mod tests {
         assert!(out.contains("Open folder"));
         assert!(out.contains("Albums"));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn finder_draws() {
+        use crate::finder::parse_results;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut finder = Finder::new("ES".to_string());
+        finder.results = parse_results(
+            r#"[{"name":"Radio Uno","url_resolved":"https://a.example/uno.mp3","codec":"MP3","bitrate":128,"countrycode":"ES"},
+                {"name":"A very long station name that must be cut so the details stay visible on screen","url_resolved":"https://a.example/dos.aac","codec":"AAC+","bitrate":64,"countrycode":"ES"}]"#,
+        )
+        .unwrap();
+        finder.state.select(Some(0));
+        finder.message = "2 stations".to_string();
+        let themes = builtin_themes();
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|frame| draw_finder(frame, frame.area(), &mut finder, &themes[0]))
+            .unwrap();
+        let out = render_text(&terminal);
+        assert!(out.contains("Find stations"));
+        assert!(out.contains("Radio Uno"));
+        assert!(out.contains("ES MP3 128k"));
+        assert!(out.contains("ES AAC+ 64k"));
+        assert!(out.contains('…'));
+        assert!(out.contains("2 stations"));
+
+        let mut small = Terminal::new(TestBackend::new(30, 8)).unwrap();
+        small
+            .draw(|frame| draw_finder(frame, frame.area(), &mut finder, &themes[0]))
+            .unwrap();
+        assert!(!render_text(&small).contains("Find stations"));
     }
 
     fn render_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {

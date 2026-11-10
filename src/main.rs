@@ -3,6 +3,7 @@ mod app;
 mod art;
 mod config;
 mod engine;
+mod finder;
 mod library;
 mod picker;
 mod radio;

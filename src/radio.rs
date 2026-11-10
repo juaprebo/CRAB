@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 const PREFILL_BYTES: usize = 96 * 1024;
 const PREFILL_TIMEOUT: Duration = Duration::from_secs(8);
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Station {
     pub name: String,
     pub url: String,
@@ -64,11 +64,14 @@ fn default_stations() -> Vec<Station> {
     .collect()
 }
 
+fn stations_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join("crab").join("stations.toml"))
+}
+
 pub fn load_stations() -> Vec<Station> {
-    let Some(dir) = dirs::config_dir().map(|d| d.join("crab")) else {
+    let Some(path) = stations_path() else {
         return default_stations();
     };
-    let path = dir.join("stations.toml");
     if let Ok(text) = std::fs::read_to_string(&path)
         && let Ok(file) = toml::from_str::<StationFile>(&text)
         && !file.station.is_empty()
@@ -76,14 +79,23 @@ pub fn load_stations() -> Vec<Station> {
         return file.station;
     }
     let stations = default_stations();
-    let file = StationFile {
-        station: stations.clone(),
-    };
-    if let Ok(text) = toml::to_string_pretty(&file) {
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(&path, text);
-    }
+    let _ = save_stations(&stations);
     stations
+}
+
+pub fn save_stations(stations: &[Station]) -> Result<()> {
+    let path = stations_path().ok_or_else(|| anyhow!("no config directory available"))?;
+    let file = StationFile {
+        station: stations.to_vec(),
+    };
+    let text = toml::to_string_pretty(&file).context("cannot encode stations")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).context("cannot create config directory")?;
+    }
+    let temp = path.with_extension("toml.tmp");
+    std::fs::write(&temp, text).context("cannot write stations")?;
+    std::fs::rename(&temp, &path).context("cannot replace stations")?;
+    Ok(())
 }
 
 pub struct BufferedStream {

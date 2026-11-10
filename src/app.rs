@@ -2,6 +2,7 @@ use crate::analyzer::Spectrum;
 use crate::art::Art;
 use crate::config::{self, Config};
 use crate::engine::{Engine, Track};
+use crate::finder::{self, Finder, FinderOutcome};
 use crate::library::{self, LocalTrack};
 use crate::picker::{Outcome, Picker};
 use crate::radio::{self, Station};
@@ -102,6 +103,8 @@ pub struct App {
     pub theme_picker: Option<ThemePicker>,
     pub theme_editor: Option<Editor>,
     pub theme_generator: Option<Generator>,
+    pub finder: Option<Finder>,
+    pending_remove: Option<usize>,
     pub config: Config,
     pub themes: Vec<Theme>,
     pub theme_index: usize,
@@ -191,6 +194,8 @@ impl App {
             theme_picker: None,
             theme_editor: None,
             theme_generator: None,
+            finder: None,
+            pending_remove: None,
             config,
             themes,
             theme_index,
@@ -548,6 +553,9 @@ impl App {
 
     pub fn tick(&mut self, bars: usize) {
         self.expire_status();
+        if let Some(finder) = self.finder.as_mut() {
+            finder.poll();
+        }
         if let Some((_, rx)) = &self.watcher {
             let mut changed = false;
             while rx.try_recv().is_ok() {
@@ -959,6 +967,13 @@ impl App {
             self.quit = true;
             return;
         }
+        if key.code != KeyCode::Char('x') {
+            self.pending_remove = None;
+        }
+        if self.finder.is_some() {
+            self.finder_key(key);
+            return;
+        }
         if self.theme_editor.is_some() {
             self.theme_editor_key(key);
             return;
@@ -978,6 +993,8 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('o') => self.open_picker(),
+            KeyCode::Char('/') if self.tab == Tab::Radio => self.open_finder(),
+            KeyCode::Char('x') if self.tab == Tab::Radio => self.remove_station(),
             KeyCode::Tab => self.switch_tab(true),
             KeyCode::BackTab => self.switch_tab(false),
             KeyCode::Char('1') => self.tab = Tab::Library,
@@ -1010,6 +1027,80 @@ impl App {
                 self.set_status(label, false);
             }
             _ => {}
+        }
+    }
+
+    fn open_finder(&mut self) {
+        let mut finder = Finder::new(finder::default_country());
+        finder.start();
+        self.finder = Some(finder);
+    }
+
+    fn finder_key(&mut self, key: KeyEvent) {
+        let Some(finder) = self.finder.as_mut() else {
+            return;
+        };
+        match finder.on_key(key) {
+            FinderOutcome::None => {}
+            FinderOutcome::Close => self.finder = None,
+            FinderOutcome::Play(station) => {
+                self.finder = None;
+                self.add_station(station);
+            }
+        }
+    }
+
+    fn add_station(&mut self, station: Station) {
+        if let Some(index) = self.stations.iter().position(|s| s.url == station.url) {
+            self.play_radio(index);
+            return;
+        }
+        let name = station.name.clone();
+        self.stations.push(station);
+        let index = self.stations.len() - 1;
+        match radio::save_stations(&self.stations) {
+            Ok(()) => self.play_radio(index),
+            Err(error) => {
+                self.play_radio(index);
+                self.set_status(format!("{name} not saved: {error:#}"), true);
+            }
+        }
+    }
+
+    fn remove_station(&mut self) {
+        let Some(index) = self.radio_state.selected() else {
+            return;
+        };
+        let Some(station) = self.stations.get(index) else {
+            return;
+        };
+        if self.stations.len() <= 1 {
+            self.set_status("Keep at least one station", true);
+            return;
+        }
+        if self.pending_remove != Some(index) {
+            let message = format!("Press x again to remove {}", station.name);
+            self.pending_remove = Some(index);
+            self.set_status(message, false);
+            return;
+        }
+        self.pending_remove = None;
+        let removed = self.stations.remove(index);
+        match self.active {
+            Active::Radio(current) if current == index => {
+                self.generation += 1;
+                self.engine.stop();
+                self.active = Active::None;
+                self.loading = false;
+            }
+            Active::Radio(current) if current > index => self.active = Active::Radio(current - 1),
+            _ => {}
+        }
+        self.radio_state
+            .select(Some(index.min(self.stations.len() - 1)));
+        match radio::save_stations(&self.stations) {
+            Ok(()) => self.set_status(format!("Removed {}", removed.name), false),
+            Err(error) => self.set_status(format!("Removed but not saved: {error:#}"), true),
         }
     }
 

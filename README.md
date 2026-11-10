@@ -55,6 +55,8 @@ Without arguments CRAB opens the folders you used last time, or `~/Music` the fi
 | `m` | mute |
 | `s` | shuffle |
 | `o` | choose a music folder |
+| `/` | find radio stations (Radio tab) |
+| `x` | remove the selected station, press twice (Radio tab) |
 | `t` | open the theme picker |
 | `r` | reload the configuration |
 | Tab, `1` `2` `3` | switch between Library, Radio and Spotify |
@@ -72,7 +74,11 @@ Stations live in `~/.config/crab/stations.toml`, which is created on first run:
     name = "My station"
     url = "https://example.com/stream.mp3"
 
-MP3 and Ogg streams are the best supported. `.pls` and `.m3u` playlist URLs are resolved automatically.
+MP3, AAC and Ogg streams work, and `.pls` and `.m3u` playlist URLs are resolved automatically. HLS streams (`.m3u8` lists of segments) are not supported.
+
+### Finding stations
+
+Press `/` in the Radio tab to search the community directory at [radio-browser.info](https://www.radio-browser.info). The country field starts with the one from your locale (for example `ES` for Spanish stations), and the name field is optional: leave it empty to see the most voted stations of that country. Enter searches, Tab moves between the fields and the results, and Enter on a result saves it to `stations.toml` and starts playing it. Only streams CRAB can play are listed. Press `x` twice on a station to remove it from your list.
 
 ## Spotify
 
