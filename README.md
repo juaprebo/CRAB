@@ -1,6 +1,10 @@
+<p align="center"><img src="docs/logo.jpg" alt="CRAB - Rust Audio Box" width="280"></p>
+
 # CRAB - Rust Audio Box
 
 A terminal audio player written in Rust. It plays local files, internet radio and Spotify, and draws a live spectrum analyzer of whatever is playing.
+
+![CRAB playing a local library](docs/library.png)
 
 ## Features
 
@@ -8,7 +12,7 @@ A terminal audio player written in Rust. It plays local files, internet radio an
 - Internet radio with live track titles (ICY metadata) and automatic reconnection
 - Spotify through Spotify Connect (optional, see the notice below)
 - Real-time spectrum bars, with configurable width, gap and peak markers
-- Themes: nine built-in ones plus your own, defined in a TOML file
+- Themes: ten built-in ones plus your own, made in the built-in theme editor or defined in a TOML file
 - Volume follows the system output volume, so changes made outside CRAB show up
 
 ## Install
@@ -99,11 +103,17 @@ Built-in themes: `crab`, `synthwave`, `ocean`, `matrix`, `nord`, `dracula`, `gru
 
 ### Theme picker and editor
 
+![Theme picker](docs/themes.png)
+
 Press `t` to open the theme picker. Moving through the list previews each theme live, Enter keeps the one you chose and saves it to `config.toml`, and Esc goes back to the previous one.
 
 Press `n` in the picker to generate a whole theme from a single color. Choose the accent with the arrow keys (left and right change the hue, up and down the lightness, PgUp and PgDn the saturation), switch between a dark and a light variant with `m`, and the interface updates as you go. Enter takes you to the editor to fine tune it. Press `e` in the picker to edit the highlighted theme instead, or `x` to delete one of your own themes (it asks for confirmation). Built-in themes cannot be deleted.
 
+![Generating a theme from one color](docs/generator.png)
+
 In the editor, Enter on a color opens the same color picker, and `#` lets you type a hex value such as `#ff5a4e`. `d` clears the optional `background` and `art` colors, `+` and `-` add or remove colors of the bar gradient (2 to 6), and `s` asks for a name and writes the theme to the `[themes.<name>]` section of `config.toml`, leaving the rest of the file untouched. Esc discards the changes.
+
+![Theme editor](docs/editor.png)
 
 A custom theme can set `base`, `background`, `text`, `dim`, `border`, `accent`, `secondary`, `on_accent`, `error`, `ok`, `art` and `bars`, a list of two or more colors that form the bar gradient. Anything you leave out is inherited from the base theme. Defining a theme with a built-in name overrides it.
 

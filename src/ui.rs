@@ -140,7 +140,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         if let Some(editing) = &editor.color {
             let title = format!("Color: {}", editor.label(editor.selected));
             let help = "←→ hue  ↑↓ lightness  PgUp/PgDn saturation  ⏎ ok  # hex  esc cancel";
-            draw_color_popup(frame, area, &editing.picker, &title, None, help, &theme);
+            let rows = editor.rows() as u16;
+            let editor_top = area.y
+                + area
+                    .height
+                    .saturating_sub((rows + 6).min(area.height.saturating_sub(2)))
+                    / 2;
+            let selected_row = editor_top + 2 + editor.selected as u16;
+            draw_color_popup(
+                frame,
+                area,
+                &editing.picker,
+                &title,
+                None,
+                help,
+                Some(selected_row),
+                &theme,
+            );
         }
     }
     if let Some(generator) = &app.theme_generator {
@@ -154,6 +170,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             "New theme: pick an accent color",
             Some(mode),
             help,
+            None,
             &theme,
         );
     }
@@ -195,6 +212,7 @@ fn bar_line(
     Line::from(spans)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_color_popup(
     frame: &mut Frame,
     area: Rect,
@@ -202,6 +220,7 @@ fn draw_color_popup(
     title: &str,
     mode: Option<&str>,
     help: &str,
+    avoid_row: Option<u16>,
     theme: &Theme,
 ) {
     if area.width < 30 || area.height < 11 {
@@ -209,12 +228,14 @@ fn draw_color_popup(
     }
     let height = if mode.is_some() { 10 } else { 9 };
     let width = 50.min(area.width);
-    let rect = Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y + 1,
-        width,
-        height.min(area.height),
-    );
+    let height = height.min(area.height);
+    let top = area.y + 1;
+    let bottom = (area.y + area.height).saturating_sub(height + 1).max(top);
+    let y = match avoid_row {
+        Some(row) if row >= top && row < top + height => bottom,
+        _ => top,
+    };
+    let rect = Rect::new(area.x + (area.width - width) / 2, y, width, height);
     let inner = overlay_block(frame, rect, theme, title.to_string());
     let mut constraints = vec![Constraint::Length(1); 3];
     constraints.push(Constraint::Length(1));
@@ -326,34 +347,43 @@ fn draw_theme_picker(
         return;
     }
     let height = (themes.len() as u16 + 4).min(area.height.saturating_sub(2));
-    let rect = centered(area, 52, height);
+    let rect = centered(area, 60, height);
     let inner = overlay_block(frame, rect, theme, "Theme".to_string());
     let [list_area, help_area] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(inner);
+    let selected = picker.selected();
     let items: Vec<ListItem> = themes
         .iter()
-        .map(|entry| {
+        .enumerate()
+        .map(|(index, entry)| {
             let custom = config
                 .themes
                 .keys()
                 .any(|k| k.eq_ignore_ascii_case(&entry.name));
+            let active = index == selected;
             let mut spans = swatch(entry, 6);
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                entry.name.clone(),
-                Style::default().fg(theme.text),
-            ));
+            let name_style = if active {
+                Style::default()
+                    .fg(theme.on_accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text)
+            };
+            spans.push(Span::styled(entry.name.clone(), name_style));
             if custom {
-                spans.push(Span::styled("  custom", Style::default().fg(theme.dim)));
+                let tag = if active { theme.on_accent } else { theme.dim };
+                spans.push(Span::styled("  custom", Style::default().fg(tag)));
             }
-            ListItem::new(Line::from(spans))
+            let item = ListItem::new(Line::from(spans));
+            if active {
+                item.style(Style::default().bg(theme.accent))
+            } else {
+                item
+            }
         })
         .collect();
-    frame.render_stateful_widget(
-        List::new(items).highlight_style(highlight(theme)),
-        list_area,
-        &mut picker.state,
-    );
+    frame.render_stateful_widget(List::new(items), list_area, &mut picker.state);
     let selected_name = themes
         .get(picker.selected())
         .map(|t| t.name.clone())
@@ -960,8 +990,21 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ("tab", "switch"),
         ("q", "quit"),
     ];
+    let item_width = |key: &str, label: &str| key.chars().count() + label.chars().count() + 3;
+    let (quit_key, quit_label) = keys[keys.len() - 1];
+    let mut budget = (area.width as usize).saturating_sub(1 + item_width(quit_key, quit_label));
+    let mut shown = Vec::new();
+    for (key, label) in &keys[..keys.len() - 1] {
+        let width = item_width(key, label);
+        if width > budget {
+            break;
+        }
+        budget -= width;
+        shown.push((*key, *label));
+    }
+    shown.push((quit_key, quit_label));
     let mut spans = vec![Span::raw(" ")];
-    for (key, label) in keys {
+    for (key, label) in shown {
         spans.push(Span::styled(
             key,
             Style::default()
@@ -1131,6 +1174,7 @@ mod tests {
                     "Color: accent",
                     None,
                     "help",
+                    None,
                     &themes[1],
                 )
             })
@@ -1151,6 +1195,7 @@ mod tests {
                     "New theme: pick an accent color",
                     Some("dark"),
                     "help",
+                    None,
                     &themes[1],
                 )
             })
