@@ -11,7 +11,7 @@ A terminal audio player written in Rust. It plays local files, internet radio an
 - Local library with automatic reload when files are added or removed, and a built-in folder browser
 - Internet radio with live track titles (ICY metadata) and automatic reconnection
 - Spotify through Spotify Connect (optional, see the notice below)
-- Real-time spectrum bars, with configurable width, gap and peak markers
+- Six live visualizers (bars, mirror, line, dots, waveform and spectrogram), switchable with a key
 - Themes: ten built-in ones plus your own, made in the built-in theme editor or defined in a TOML file
 - Volume follows the system output volume, so changes made outside CRAB show up
 
@@ -55,6 +55,7 @@ Without arguments CRAB opens the folders you used last time, or `~/Music` the fi
 | `m` | mute |
 | `s` | shuffle |
 | `o` | choose a music folder |
+| `v` | next visualizer |
 | `/` | find radio stations (Radio tab) |
 | `x` | remove the selected station, press twice (Radio tab) |
 | `t` | open the theme picker |
@@ -66,6 +67,21 @@ Without arguments CRAB opens the folders you used last time, or `~/Music` the fi
 ### Folder browser
 
 Press `o` to browse folders without leaving CRAB. Enter opens a folder, Backspace goes up, Space makes the current folder your library, `a` adds it to the library, `/` lets you type a path, `~` jumps to your home folder and `.` shows hidden folders. The chosen folders are remembered for the next start. Folders given on the command line take priority.
+
+### Visualizers
+
+Press `v` to cycle through the visualizers. The one you leave selected is saved to `config.toml` and used on the next start.
+
+| Style | Looks like |
+| --- | --- |
+| `bars` | classic spectrum bars with peak markers |
+| `mirror` | the same bars, mirrored above and below a center line |
+| `line` | the spectrum as a smooth line |
+| `dots` | the spectrum as a stippled area |
+| `wave` | the waveform of the audio, like an oscilloscope |
+| `waterfall` | a spectrogram: the spectrum scrolling down over time |
+
+`bar_width` and `gap` apply to `bars` and `mirror`, and `peaks` to `bars`.
 
 ## Radio
 
@@ -97,6 +113,7 @@ CRAB is an independent project. It is not affiliated with, endorsed by or sponso
     art_file = "~/.config/crab/art.txt"
 
     [visualizer]
+    style = "bars"
     bar_width = 2
     gap = 1
     peaks = true

@@ -1,12 +1,13 @@
 use crate::app::{Active, App, SpotifyStatus, Tab};
 use crate::art::{self, Art, Cell};
 use crate::config::Config;
-use crate::config::VisualizerConfig;
+use crate::config::{VisualizerConfig, VizStyle};
 use crate::finder::{Finder, Focus};
 use crate::picker::Picker;
 use crate::spotify;
 use crate::theme::{Theme, from_hsl, to_color, to_hex};
 use crate::theme_editor::{ColorPicker, Editor, ThemePicker};
+use crate::viz::{CurveView, MirrorView, WaterfallView, WaveView};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -981,20 +982,55 @@ fn draw_spotify(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn draw_spectrum(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let block = panel(theme, "Spectrum".to_string());
+    let config = &app.config.visualizer;
+    let block = panel(theme, config.style.title().to_string());
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(
-        SpectrumView {
-            levels: app.spectrum.levels(),
-            peaks: app.spectrum.peaks(),
-            theme,
-            bar_width: app.config.visualizer.bar_width(),
-            gap: app.config.visualizer.gap(),
-            show_peaks: app.config.visualizer.peaks,
-        },
-        inner,
-    );
+    let spectrum = &app.spectrum;
+    match config.style {
+        VizStyle::Bars => frame.render_widget(
+            SpectrumView {
+                levels: spectrum.levels(),
+                peaks: spectrum.peaks(),
+                theme,
+                bar_width: config.bar_width(),
+                gap: config.gap(),
+                show_peaks: config.peaks,
+            },
+            inner,
+        ),
+        VizStyle::Mirror => frame.render_widget(
+            MirrorView {
+                levels: spectrum.levels(),
+                theme,
+                bar_width: config.bar_width(),
+                gap: config.gap(),
+            },
+            inner,
+        ),
+        VizStyle::Line | VizStyle::Dots => frame.render_widget(
+            CurveView {
+                levels: spectrum.levels(),
+                theme,
+                stipple: config.style == VizStyle::Dots,
+            },
+            inner,
+        ),
+        VizStyle::Wave => frame.render_widget(
+            WaveView {
+                wave: spectrum.wave(),
+                theme,
+            },
+            inner,
+        ),
+        VizStyle::Waterfall => frame.render_widget(
+            WaterfallView {
+                history: spectrum.history(),
+                theme,
+            },
+            inner,
+        ),
+    }
 }
 
 fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -1113,6 +1149,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ("m", "mute"),
         ("s", if app.shuffle { "shuffle on" } else { "shuffle" }),
         ("o", "folder"),
+        ("v", "viz"),
     ];
     if app.tab == Tab::Radio {
         keys.insert(2, ("/", "find"));
@@ -1171,6 +1208,7 @@ mod tests {
             bar_width: 3,
             gap: 1,
             peaks: true,
+            ..VisualizerConfig::default()
         };
         let area = Rect::new(0, 0, 60, 8);
         let bars = bar_count(area.width + 2, &config);
@@ -1373,12 +1411,14 @@ mod tests {
             bar_width: 1,
             gap: 0,
             peaks: true,
+            ..VisualizerConfig::default()
         };
         assert_eq!(bar_count(102, &config), 100);
         let wide = VisualizerConfig {
             bar_width: 3,
             gap: 1,
             peaks: true,
+            ..VisualizerConfig::default()
         };
         assert_eq!(bar_count(82, &wide), 20);
     }

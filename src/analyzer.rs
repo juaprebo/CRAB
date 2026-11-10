@@ -4,6 +4,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const FFT_SIZE: usize = 2048;
+const WAVE_LEN: usize = 1024;
+const HISTORY_ROWS: usize = 64;
+const HISTORY_EVERY: u32 = 3;
 
 pub struct SampleTap {
     buffer: Mutex<VecDeque<f32>>,
@@ -55,6 +58,9 @@ pub struct Spectrum {
     scratch: Vec<Complex<f32>>,
     levels: Vec<f32>,
     peaks: Vec<f32>,
+    wave: Vec<f32>,
+    history: VecDeque<Vec<f32>>,
+    countdown: u32,
 }
 
 impl Spectrum {
@@ -72,6 +78,9 @@ impl Spectrum {
             scratch: vec![Complex::new(0.0, 0.0); FFT_SIZE],
             levels: Vec::new(),
             peaks: Vec::new(),
+            wave: Vec::new(),
+            history: VecDeque::new(),
+            countdown: HISTORY_EVERY,
         }
     }
 
@@ -83,18 +92,28 @@ impl Spectrum {
         &self.peaks
     }
 
+    pub fn wave(&self) -> &[f32] {
+        &self.wave
+    }
+
+    pub fn history(&self) -> &VecDeque<Vec<f32>> {
+        &self.history
+    }
+
     pub fn update(&mut self, bars: usize, tap: &SampleTap, active: bool) {
         let bars = bars.max(1);
         if self.levels.len() != bars {
             self.levels = vec![0.0; bars];
             self.peaks = vec![0.0; bars];
+            self.history.clear();
         }
 
-        let targets = if active {
-            self.analyze(bars, tap)
-        } else {
-            vec![0.0; bars]
+        let snapshot = if active { Some(tap.snapshot()) } else { None };
+        let targets = match &snapshot {
+            Some((samples, rate)) => self.analyze(bars, samples, *rate),
+            None => vec![0.0; bars],
         };
+        self.update_wave(snapshot.as_ref().map(|(samples, _)| samples.as_slice()));
 
         for ((level, peak), &target) in self
             .levels
@@ -113,10 +132,35 @@ impl Spectrum {
                 *peak = (*peak - 0.012).max(*level);
             }
         }
+
+        self.countdown = self.countdown.saturating_sub(1);
+        if self.countdown == 0 {
+            self.countdown = HISTORY_EVERY;
+            self.history.push_front(self.levels.clone());
+            self.history.truncate(HISTORY_ROWS);
+        }
     }
 
-    fn analyze(&mut self, bars: usize, tap: &SampleTap) -> Vec<f32> {
-        let (samples, rate) = tap.snapshot();
+    fn update_wave(&mut self, samples: Option<&[f32]>) {
+        match samples {
+            Some(samples) => {
+                let limit = FFT_SIZE - WAVE_LEN;
+                let start = (1..limit)
+                    .find(|&i| samples[i - 1] < 0.0 && samples[i] >= 0.0)
+                    .unwrap_or(limit);
+                self.wave.clear();
+                self.wave
+                    .extend_from_slice(&samples[start..start + WAVE_LEN]);
+            }
+            None => {
+                for value in &mut self.wave {
+                    *value *= 0.7;
+                }
+            }
+        }
+    }
+
+    fn analyze(&mut self, bars: usize, samples: &[f32], rate: u32) -> Vec<f32> {
         for (i, slot) in self.scratch.iter_mut().enumerate() {
             *slot = Complex::new(samples[i] * self.window[i], 0.0);
         }
@@ -182,6 +226,41 @@ mod tests {
         );
         assert!(levels[loudest] > 0.8);
         assert!(levels[0] < 0.4);
+    }
+
+    #[test]
+    fn wave_triggers_on_rising_crossing() {
+        let tap = SampleTap::new();
+        tap.set_sample_rate(44_100);
+        tap.push(&sine(440.0, 44_100, FFT_SIZE));
+        let mut spectrum = Spectrum::new();
+        spectrum.update(16, &tap, true);
+        let wave = spectrum.wave();
+        assert_eq!(wave.len(), WAVE_LEN);
+        assert!(wave[0] >= 0.0 && wave[0] < 0.2);
+        assert!(wave.iter().any(|v| *v > 0.7));
+        for _ in 0..40 {
+            spectrum.update(16, &tap, false);
+        }
+        assert!(spectrum.wave().iter().all(|v| v.abs() < 0.001));
+    }
+
+    #[test]
+    fn history_scrolls_and_resets() {
+        let tap = SampleTap::new();
+        tap.push(&sine(1000.0, 44_100, FFT_SIZE));
+        let mut spectrum = Spectrum::new();
+        for _ in 0..(HISTORY_EVERY as usize * 5) {
+            spectrum.update(24, &tap, true);
+        }
+        assert_eq!(spectrum.history().len(), 5);
+        assert!(spectrum.history().iter().all(|row| row.len() == 24));
+        for _ in 0..(HISTORY_EVERY as usize * HISTORY_ROWS) {
+            spectrum.update(24, &tap, true);
+        }
+        assert_eq!(spectrum.history().len(), HISTORY_ROWS);
+        spectrum.update(30, &tap, true);
+        assert!(spectrum.history().len() <= 1);
     }
 
     #[test]

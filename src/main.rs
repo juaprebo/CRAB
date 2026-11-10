@@ -18,6 +18,7 @@ mod testutil;
 mod theme;
 mod theme_editor;
 mod ui;
+mod viz;
 
 use anyhow::Result;
 use app::App;

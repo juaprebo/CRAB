@@ -993,6 +993,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc => self.cancel_loading(),
+            KeyCode::Char('v') => self.next_visualizer(),
             KeyCode::Char('o') => self.open_picker(),
             KeyCode::Char('/') if self.tab == Tab::Radio => self.open_finder(),
             KeyCode::Char('x') if self.tab == Tab::Radio => self.remove_station(),
@@ -1038,6 +1039,18 @@ impl App {
             self.active = Active::None;
             self.loading = false;
             self.set_status("Connection cancelled", false);
+        }
+    }
+
+    fn next_visualizer(&mut self) {
+        let style = self.config.visualizer.style.next();
+        self.config.visualizer.style = style;
+        match config::pick_visualizer(style) {
+            Ok(()) => self.set_status(format!("Visualizer: {}", style.name()), false),
+            Err(error) => self.set_status(
+                format!("Visualizer: {} (not saved: {error:#})", style.name()),
+                true,
+            ),
         }
     }
 

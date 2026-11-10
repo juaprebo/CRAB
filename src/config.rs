@@ -10,6 +10,7 @@ show_art = true
 art_strength = 0.35
 
 [visualizer]
+style = "bars"
 bar_width = 2
 gap = 1
 peaks = true
@@ -21,9 +22,60 @@ secondary = "#7c4dff"
 bars = ["#00e5ff", "#7c4dff", "#ff4081"]
 "##;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VizStyle {
+    #[default]
+    Bars,
+    Mirror,
+    Line,
+    Dots,
+    Wave,
+    Waterfall,
+}
+
+impl VizStyle {
+    const ALL: [VizStyle; 6] = [
+        VizStyle::Bars,
+        VizStyle::Mirror,
+        VizStyle::Line,
+        VizStyle::Dots,
+        VizStyle::Wave,
+        VizStyle::Waterfall,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            VizStyle::Bars => "bars",
+            VizStyle::Mirror => "mirror",
+            VizStyle::Line => "line",
+            VizStyle::Dots => "dots",
+            VizStyle::Wave => "wave",
+            VizStyle::Waterfall => "waterfall",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            VizStyle::Bars => "Spectrum",
+            VizStyle::Mirror => "Spectrum - mirror",
+            VizStyle::Line => "Spectrum - line",
+            VizStyle::Dots => "Spectrum - dots",
+            VizStyle::Wave => "Waveform",
+            VizStyle::Waterfall => "Spectrogram",
+        }
+    }
+
+    pub fn next(self) -> VizStyle {
+        let index = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct VisualizerConfig {
+    pub style: VizStyle,
     pub bar_width: u16,
     pub gap: u16,
     pub peaks: bool,
@@ -32,6 +84,7 @@ pub struct VisualizerConfig {
 impl Default for VisualizerConfig {
     fn default() -> Self {
         Self {
+            style: VizStyle::Bars,
             bar_width: 2,
             gap: 1,
             peaks: true,
@@ -103,6 +156,44 @@ pub fn set_key(text: &str, key: &str, value: &str) -> String {
     out
 }
 
+pub fn set_section_key(text: &str, section: &str, key: &str, value: &str) -> String {
+    let encoded = toml::Value::String(value.to_string()).to_string();
+    let new_line = format!("{key} = {encoded}");
+    let header = format!("[{section}]");
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let Some(start) = lines.iter().position(|l| l.trim() == header) else {
+        let mut out = lines.join("\n");
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&header);
+        out.push('\n');
+        out.push_str(&new_line);
+        out.push('\n');
+        return out;
+    };
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| is_header(l))
+        .map(|offset| start + 1 + offset)
+        .unwrap_or(lines.len());
+    let existing = lines[start + 1..end]
+        .iter()
+        .position(|line| {
+            line.trim_start()
+                .strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        })
+        .map(|offset| start + 1 + offset);
+    match existing {
+        Some(index) => lines[index] = new_line,
+        None => lines.insert(start + 1, new_line),
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
 pub fn remove_section(text: &str, name: &str) -> String {
     let bare = format!("[themes.{}]", toml_key(name));
     let quoted = format!("[themes.\"{name}\"]");
@@ -159,6 +250,10 @@ fn edit_config(edit: impl FnOnce(&str) -> String) -> Result<()> {
 
 pub fn pick_theme(name: &str) -> Result<()> {
     edit_config(|text| set_key(text, "theme", name))
+}
+
+pub fn pick_visualizer(style: VizStyle) -> Result<()> {
+    edit_config(|text| set_section_key(text, "visualizer", "style", style.name()))
 }
 
 pub fn save_theme(name: &str, section: &str) -> Result<()> {
@@ -256,6 +351,53 @@ mod tests {
         let themes = config.build_themes();
         assert!(themes.iter().any(|t| t.name == "example"));
         assert!(themes.iter().any(|t| t.name == "nord"));
+    }
+
+    #[test]
+    fn style_cycle_and_names() {
+        let mut style = VizStyle::Bars;
+        let mut seen = Vec::new();
+        for _ in 0..VizStyle::ALL.len() {
+            seen.push(style.name());
+            let parsed: Config =
+                toml::from_str(&format!("[visualizer]\nstyle = \"{}\"\n", style.name())).unwrap();
+            assert_eq!(parsed.visualizer.style, style);
+            style = style.next();
+        }
+        assert_eq!(style, VizStyle::Bars);
+        assert_eq!(
+            seen,
+            ["bars", "mirror", "line", "dots", "wave", "waterfall"]
+        );
+        assert!(toml::from_str::<Config>("[visualizer]\nstyle = \"disco\"\n").is_err());
+        let default: Config = toml::from_str("").unwrap();
+        assert_eq!(default.visualizer.style, VizStyle::Bars);
+    }
+
+    #[test]
+    fn section_key_cases() {
+        let present = "theme = \"crab\"\n\n[visualizer]\nstyle = \"bars\"\npeaks = false\n\n[themes.a]\nstyle = \"x\"\n";
+        let out = set_section_key(present, "visualizer", "style", "wave");
+        assert!(out.contains("[visualizer]\nstyle = \"wave\"\npeaks = false"));
+        assert!(out.contains("[themes.a]\nstyle = \"x\""));
+        let config: Config = toml::from_str(&out).unwrap();
+        assert_eq!(config.visualizer.style, VizStyle::Wave);
+        assert!(!config.visualizer.peaks);
+
+        let missing_key = "[visualizer]\npeaks = false\n";
+        let out = set_section_key(missing_key, "visualizer", "style", "dots");
+        let config: Config = toml::from_str(&out).unwrap();
+        assert_eq!(config.visualizer.style, VizStyle::Dots);
+        assert!(!config.visualizer.peaks);
+
+        let no_section = "theme = \"nord\"\n";
+        let out = set_section_key(no_section, "visualizer", "style", "mirror");
+        let config: Config = toml::from_str(&out).unwrap();
+        assert_eq!(config.visualizer.style, VizStyle::Mirror);
+        assert_eq!(config.theme, "nord");
+
+        let empty = set_section_key("", "visualizer", "style", "line");
+        assert_eq!(empty, "[visualizer]\nstyle = \"line\"\n");
     }
 
     #[test]
