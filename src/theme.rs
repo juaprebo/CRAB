@@ -403,6 +403,15 @@ impl Theme {
         mix(from, to, local)
     }
 
+    pub fn art_on_accent(&self, strength: f32) -> Color {
+        let (r, g, b) = mix(
+            rgb(self.accent),
+            rgb(self.on_accent),
+            (strength * 0.7).clamp(0.08, 0.6),
+        );
+        Color::Rgb(r, g, b)
+    }
+
     pub fn art_color(&self, t: f32, strength: f32) -> Color {
         if let Some(color) = self.art {
             return color;
@@ -506,6 +515,22 @@ mod tests {
     fn key_quoting() {
         assert_eq!(toml_key("my-theme_2"), "my-theme_2");
         assert_eq!(toml_key("my theme"), "\"my theme\"");
+    }
+
+    #[test]
+    fn art_on_accent_sits_between_bar_and_text() {
+        for theme in builtin_themes() {
+            let faint = rgb(theme.art_on_accent(0.1));
+            let strong = rgb(theme.art_on_accent(1.0));
+            let (accent, on_accent) = (rgb(theme.accent), rgb(theme.on_accent));
+            let dist = |a: (u8, u8, u8), b: (u8, u8, u8)| {
+                (a.0 as i32 - b.0 as i32).abs()
+                    + (a.1 as i32 - b.1 as i32).abs()
+                    + (a.2 as i32 - b.2 as i32).abs()
+            };
+            assert!(dist(faint, accent) <= dist(strong, accent));
+            assert!(dist(strong, accent) < dist(on_accent, accent) || accent == on_accent);
+        }
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub struct Cell {
     pub y: u16,
     pub symbol: char,
     pub depth: f32,
+    pub rgb: Option<([u8; 3], [u8; 3])>,
 }
 
 fn segment_distance(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
@@ -110,6 +111,7 @@ pub fn crab_cells(cols: u16, rows: u16) -> Vec<Cell> {
                 y: row,
                 symbol,
                 depth: v.clamp(0.0, 1.0),
+                rgb: None,
             });
         }
     }
@@ -135,6 +137,7 @@ pub fn text_cells(lines: &[String], cols: u16, rows: u16) -> Vec<Cell> {
                 y: (origin_y + row) as u16,
                 symbol,
                 depth: row as f32 / total,
+                rgb: None,
             });
         }
     }
