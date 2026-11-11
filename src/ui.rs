@@ -4,6 +4,7 @@ use crate::clock;
 use crate::config::Config;
 use crate::config::{VisualizerConfig, VizStyle};
 use crate::finder::{Finder, Focus};
+use crate::keys::Action;
 use crate::picker::Picker;
 use crate::spotify;
 use crate::theme::{Theme, from_hsl, to_color, to_hex};
@@ -1156,53 +1157,106 @@ fn draw_queue_view(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) 
 
 const HELP: &[(&str, &str)] = &[
     ("", "Playback"),
-    ("space", "pause or resume"),
-    ("n / p", "next / previous"),
-    ("left / right", "seek 5 seconds (local files)"),
-    ("+ / -", "volume"),
-    ("m", "mute"),
-    ("s", "shuffle"),
-    ("R", "repeat off, all or one"),
-    ("Q", "queue the selected or marked tracks to play next"),
-    ("Z", "show the queue"),
+    ("@pause", "pause or resume"),
+    ("@next / @prev", "next / previous"),
+    ("@seek-back / @seek-forward", "seek 5 seconds (local files)"),
+    ("@volume-up / @volume-down", "volume"),
+    ("@mute", "mute"),
+    ("@shuffle", "shuffle"),
+    ("@repeat", "repeat off, all or one"),
+    ("@queue", "queue the selected or marked tracks to play next"),
+    ("@queue-view", "show the queue"),
+    ("@sleep", "sleep timer: 15, 30, 60 and 90 minutes"),
+    ("@eq", "equalizer preset"),
+    ("@lyrics", "lyrics of the current track"),
     ("", "Navigation"),
-    ("1 2 3 4, tab", "Library, Playlists, Radio, Spotify"),
-    ("up / down, j / k", "select"),
-    ("enter", "play"),
-    ("g / G", "first / last"),
-    ("esc", "cancel, clear the filter or go back"),
+    (
+        "@tab-1 @tab-2 @tab-3 @tab-4",
+        "Library, Playlists, Radio, Spotify",
+    ),
+    ("@tab-next", "next tab"),
+    ("@up / @down", "select"),
+    ("@play", "play"),
+    ("gg / @bottom", "first / last (7G or 7gg jumps to row 7)"),
+    ("@half-up / @half-down", "half page up / down"),
+    (
+        "5j 15k 9n",
+        "a count (starting with 5-9) repeats the next action",
+    ),
+    ("@cancel", "cancel, clear the filter or go back"),
     ("", "Library"),
-    ("/", "filter by title, artist or album"),
-    ("S", "sort by path, title, artist or album"),
-    ("a / A", "mark a track / mark all"),
-    ("w", "save the marked tracks to a playlist"),
-    ("o", "choose a music folder"),
+    ("@search", "filter by title, artist or album"),
+    ("@sort", "sort by path, title, artist or album"),
+    ("@mark / @mark-all", "mark a track / mark all"),
+    ("@visual", "visual selection: move to mark a range"),
+    ("@save", "save the marked tracks to a playlist"),
+    ("@folder", "choose a music folder"),
     ("", "Playlists"),
-    ("a", "new playlist / add files to an open playlist"),
-    ("e", "open the selected playlist"),
-    ("d / D", "mark a track / mark all (open playlist)"),
-    ("x", "delete the playlist, or remove the marked tracks"),
-    ("i / E", "import / export an .m3u file"),
+    ("@mark", "new playlist / add files to an open playlist"),
+    ("@open-list", "open the selected playlist"),
+    (
+        "@track-mark / @track-mark-all",
+        "mark a track / mark all (open playlist)",
+    ),
+    (
+        "@remove",
+        "delete the playlist, or remove the marked tracks",
+    ),
+    ("@import / @export", "import / export an .m3u file"),
     ("", "Radio"),
-    ("/", "find stations"),
-    ("x", "remove the selected station"),
+    ("@search", "find stations"),
+    ("@remove", "remove the selected station"),
     ("", "Other"),
-    ("v", "next visualizer"),
-    ("c", "show or hide the clock"),
-    ("z", "sleep timer: 15, 30, 60 and 90 minutes"),
-    ("y", "equalizer preset"),
-    ("L", "lyrics of the current track"),
-    ("t", "theme picker"),
-    ("r", "reload the configuration"),
-    ("?", "this help"),
-    ("q", "quit"),
+    ("@command", "command line (tab completes)"),
+    ("@stats", "show or hide CPU and memory used by CRAB"),
+    ("@visualizer", "next visualizer"),
+    ("@clock", "show or hide the clock"),
+    ("@theme", "theme picker"),
+    ("@reload", "reload the configuration"),
+    ("@help", "this help"),
+    ("@quit", "quit"),
+    ("", "Commands"),
+    (
+        ":sort :sleep :eq :repeat",
+        "set a value directly, for example :sleep 30",
+    ),
+    (
+        ":volume :seek :theme :viz",
+        ":volume 60, :seek 1:30, :theme synthwave",
+    ),
+    (":tab :save :import :export", "jump and open dialogs"),
+    (
+        ":map <action> <key>...",
+        "rebind an action and save it to [keys]",
+    ),
+    (":unmap <action>", "remove the keys of an action"),
+    (":map <action>", "show the keys of an action"),
 ];
+
+fn help_keys(app: &App, spec: &str) -> String {
+    let tokens: Vec<&str> = spec.split(' ').collect();
+    if tokens.len() == 1
+        && let Some(name) = tokens[0].strip_prefix('@')
+        && let Some(action) = crate::keys::action_by_name(name)
+    {
+        return app.keys.all(action);
+    }
+    tokens
+        .iter()
+        .map(|token| match token.strip_prefix('@') {
+            Some(name) => crate::keys::action_by_name(name)
+                .map_or_else(|| (*token).to_string(), |a| app.keys.first(a)),
+            None => (*token).to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 fn draw_help(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let Some(offset) = app.help else {
         return;
     };
-    let width = area.width.saturating_sub(4).min(76);
+    let width = area.width.saturating_sub(4).min(90);
     let height = area.height.saturating_sub(2).min(HELP.len() as u16 + 3);
     if width < 40 || height < 8 {
         return;
@@ -1216,9 +1270,11 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     app.help = Some(offset);
     let lines: Vec<Line> = HELP
         .iter()
+        .filter(|(spec, _)| app.keys.vim() || !(spec.starts_with("gg") || spec.starts_with("5j")))
         .skip(offset)
         .take(visible)
-        .map(|(key, text)| {
+        .map(|(spec, text)| {
+            let key = help_keys(app, spec);
             if key.is_empty() {
                 Line::styled(
                     text.to_string(),
@@ -1229,7 +1285,7 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
             } else {
                 Line::from(vec![
                     Span::styled(
-                        format!("  {key:<18}"),
+                        format!("  {key:<28}"),
                         Style::default()
                             .fg(theme.accent)
                             .add_modifier(Modifier::BOLD),
@@ -1630,6 +1686,12 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme)
     if app.config.audio.eq_gains().iter().any(|g| g.abs() >= 0.05) {
         badges.push(format!("eq {}", app.config.audio.eq));
     }
+    if let Some(stats) = app.stats_badge() {
+        badges.push(stats);
+    }
+    if app.visual_active() {
+        badges.push("visual".to_string());
+    }
     if let Some(left) = app.sleep_left() {
         badges.push(format!("sleep {}m", left.as_secs().div_ceil(60)));
     }
@@ -1701,6 +1763,22 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme)
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    if let Some(input) = &app.cmdline {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " :",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(input.clone(), Style::default().fg(theme.text)),
+                Span::styled("▏", Style::default().fg(theme.accent)),
+            ])),
+            area,
+        );
+        return;
+    }
     if !app.status.is_empty() {
         let color = if app.status_is_error {
             theme.error
@@ -1716,63 +1794,77 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         );
         return;
     }
-    let mut keys = vec![
-        ("↑↓", "select"),
-        ("⏎", "play"),
-        ("space", "pause"),
-        ("n/p", "next/prev"),
-        ("←→", "seek"),
-        ("+/-", "volume"),
-        ("m", "mute"),
-        ("s", if app.shuffle { "shuffle on" } else { "shuffle" }),
-        ("R", "repeat"),
-        ("Q", "queue"),
-        ("v", "viz"),
-        ("c", "clock"),
-        ("o", "folder"),
+    let k = |action: Action| app.keys.first(action);
+    let mut keys: Vec<(String, &str)> = vec![
+        (format!("{}{}", k(Action::Up), k(Action::Down)), "select"),
+        (k(Action::Play), "play"),
+        (k(Action::Pause), "pause"),
+        (
+            format!("{}/{}", k(Action::Next), k(Action::Prev)),
+            "next/prev",
+        ),
+        (
+            format!("{}{}", k(Action::SeekBack), k(Action::SeekForward)),
+            "seek",
+        ),
+        (
+            format!("{}/{}", k(Action::VolumeUp), k(Action::VolumeDown)),
+            "volume",
+        ),
+        (k(Action::Mute), "mute"),
+        (
+            k(Action::Shuffle),
+            if app.shuffle { "shuffle on" } else { "shuffle" },
+        ),
+        (k(Action::Repeat), "repeat"),
+        (k(Action::Queue), "queue"),
+        (k(Action::Visualizer), "viz"),
+        (k(Action::Clock), "clock"),
+        (k(Action::Folder), "folder"),
     ];
     if app.tab == Tab::Radio {
-        keys.insert(2, ("/", "find"));
-        keys.insert(3, ("x", "remove"));
+        keys.insert(2, (k(Action::Search), "find"));
+        keys.insert(3, (k(Action::Remove), "remove"));
     }
     if app.tab == Tab::Library && !app.filtering {
-        keys.insert(2, ("/", "filter"));
-        keys.insert(3, ("S", "sort"));
-        keys.insert(4, ("a", "mark"));
-        keys.insert(5, ("A", "all"));
-        keys.insert(6, ("w", "save list"));
+        keys.insert(2, (k(Action::Search), "filter"));
+        keys.insert(3, (k(Action::Sort), "sort"));
+        keys.insert(4, (k(Action::Mark), "mark"));
+        keys.insert(5, (k(Action::MarkAll), "all"));
+        keys.insert(6, (k(Action::Save), "save list"));
     }
     if app.tab == Tab::Playlists {
         if app.open_playlist.is_none() {
-            keys.insert(2, ("a", "new list"));
-            keys.insert(3, ("e", "open"));
-            keys.insert(4, ("x", "delete"));
+            keys.insert(2, (k(Action::Mark), "new list"));
+            keys.insert(3, (k(Action::OpenList), "open"));
+            keys.insert(4, (k(Action::Remove), "delete"));
         } else {
-            keys.insert(2, ("a", "add files"));
-            keys.insert(3, ("d", "mark"));
-            keys.insert(4, ("D", "all"));
-            keys.insert(5, ("x", "remove"));
-            keys.insert(6, ("esc", "back"));
+            keys.insert(2, (k(Action::Mark), "add files"));
+            keys.insert(3, (k(Action::TrackMark), "mark"));
+            keys.insert(4, (k(Action::TrackMarkAll), "all"));
+            keys.insert(5, (k(Action::Remove), "remove"));
+            keys.insert(6, (k(Action::Cancel), "back"));
         }
     }
     keys.extend([
-        ("t", "theme"),
-        ("?", "help"),
-        ("tab", "switch"),
-        ("q", "quit"),
+        (k(Action::Command), "command"),
+        (k(Action::Theme), "theme"),
+        (k(Action::Help), "help"),
+        (k(Action::TabNext), "switch"),
+        (k(Action::Quit), "quit"),
     ]);
     if app.tab == Tab::Library && app.filtering {
         keys = vec![
-            ("type", "filter"),
-            ("↑↓", "select"),
-            ("⏎", "keep"),
-            ("esc", "clear"),
-            ("^c", "quit"),
+            ("type".to_string(), "filter"),
+            ("↑↓".to_string(), "select"),
+            ("⏎".to_string(), "keep"),
+            ("esc".to_string(), "clear"),
+            ("^c".to_string(), "quit"),
         ];
     }
     let item_width = |key: &str, label: &str| key.chars().count() + label.chars().count() + 3;
-    let (quit_key, quit_label) = keys[keys.len() - 1];
-    let mut budget = (area.width as usize).saturating_sub(1 + item_width(quit_key, quit_label));
+    let (quit_key, quit_label) = keys[keys.len() - 1].clone();
+    let mut budget = (area.width as usize).saturating_sub(1 + item_width(&quit_key, quit_label));
     let mut shown = Vec::new();
     for (key, label) in &keys[..keys.len() - 1] {
         let width = item_width(key, label);
@@ -1780,7 +1872,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             break;
         }
         budget -= width;
-        shown.push((*key, *label));
+        shown.push((key.clone(), *label));
     }
     shown.push((quit_key, quit_label));
     let mut spans = vec![Span::raw(" ")];

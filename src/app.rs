@@ -1,9 +1,11 @@
 use crate::analyzer::Spectrum;
 use crate::art::Art;
+use crate::commands::{self, SeekTo};
 use crate::config::{self, Config};
 use crate::cover::{self, Cover};
 use crate::engine::{Engine, Track};
 use crate::finder::{self, Finder, FinderOutcome};
+use crate::keys::{self, Action, Key, Keymap};
 use crate::library::{self, LocalTrack, Scan};
 use crate::lyrics::{self, Lyrics};
 use crate::media::{self, Media};
@@ -13,6 +15,7 @@ use crate::radio::{self, Station};
 use crate::scrobble::{self, Listen, Scrobbler};
 use crate::spotify::{self, SpotifyCommand, SpotifyEvent, SpotifyHandle};
 use crate::state::{self, State};
+use crate::stats::Stats;
 use crate::sysvol::{self, Request, SystemVolume};
 use crate::theme::Theme;
 use crate::theme::rgb;
@@ -128,6 +131,12 @@ enum Resume {
     Queue(usize),
 }
 
+struct Visual {
+    anchor: usize,
+    base: HashSet<PathBuf>,
+    base_index: HashSet<usize>,
+}
+
 struct Tracking {
     listen: Listen,
     played: Duration,
@@ -236,6 +245,12 @@ pub struct App {
     cover_tx: Sender<CoverResult>,
     cover_rx: Receiver<CoverResult>,
     preloaded: Option<Pick>,
+    pub keys: Keymap,
+    stats: Option<Stats>,
+    count: Option<usize>,
+    pending_g: bool,
+    visual: Option<Visual>,
+    pub cmdline: Option<String>,
     pub lyrics: Option<Lyrics>,
     pub lyrics_view: Option<usize>,
     scrobbler: Option<Scrobbler>,
@@ -268,6 +283,7 @@ impl App {
     pub fn new(mut engine: Engine, roots: Vec<PathBuf>) -> Self {
         let (config, warning) = Config::load();
         engine.eq.set(&config.audio.eq_gains());
+        let (key_map, key_warnings) = config.keymap();
         let themes = config.build_themes();
         let theme_index = themes
             .iter()
@@ -392,6 +408,12 @@ impl App {
             cover_rx,
             cover_for: None,
             preloaded: None,
+            keys: key_map,
+            stats: None,
+            count: None,
+            pending_g: false,
+            visual: None,
+            cmdline: None,
             lyrics: None,
             lyrics_view: None,
             scrobbler: None,
@@ -411,6 +433,9 @@ impl App {
             rng: seed,
         };
         app.start_scrobbler();
+        if !key_warnings.is_empty() {
+            app.set_status(key_warnings.join("; "), true);
+        }
         app
     }
 
@@ -668,10 +693,13 @@ impl App {
             .unwrap_or(0);
         self.art = config.load_art();
         self.config = config;
+        let (key_map, key_warnings) = self.config.keymap();
+        self.keys = key_map;
         self.apply_eq();
         self.start_scrobbler();
         match warning {
             Some(message) => self.set_status(message, true),
+            None if !key_warnings.is_empty() => self.set_status(key_warnings.join("; "), true),
             None => self.set_status("Config reloaded", false),
         }
     }
@@ -839,6 +867,9 @@ impl App {
         self.check_sleep();
         self.autosave();
         self.drive_transitions();
+        if let Some(stats) = self.stats.as_mut() {
+            stats.refresh();
+        }
         self.track_listen();
         if let Some(finder) = self.finder.as_mut() {
             finder.poll();
@@ -1108,6 +1139,10 @@ impl App {
 
     fn cycle_eq(&mut self) {
         let name = crate::eq::next_preset(&self.config.audio.eq);
+        self.set_eq(name);
+    }
+
+    fn set_eq(&mut self, name: &str) {
         self.config.audio.eq = name.to_string();
         self.config.audio.eq_bands = None;
         self.apply_eq();
@@ -1606,19 +1641,6 @@ impl App {
         state.select(Some(next));
     }
 
-    fn select_edge(&mut self, last: bool) {
-        let len = self.list_len();
-        if len == 0 {
-            return;
-        }
-        let target = if last { len - 1 } else { 0 };
-        match self.tab {
-            Tab::Library | Tab::Playlists => self.library_state_mut().select(Some(target)),
-            Tab::Radio => self.radio_state.select(Some(target)),
-            Tab::Spotify => {}
-        }
-    }
-
     fn switch_tab(&mut self, forward: bool) {
         let index = self.tab.index();
         let count = Tab::ALL.len();
@@ -1707,9 +1729,6 @@ impl App {
             self.quit = true;
             return;
         }
-        if key.code != KeyCode::Char('x') {
-            self.pending_remove = None;
-        }
         if self.help.is_some() {
             self.help_key(key);
             return;
@@ -1724,6 +1743,10 @@ impl App {
         }
         if self.name_prompt.is_some() {
             self.name_prompt_key(key);
+            return;
+        }
+        if self.cmdline.is_some() {
+            self.cmdline_key(key);
             return;
         }
         if self.filtering {
@@ -1750,80 +1773,560 @@ impl App {
             self.picker_key(key);
             return;
         }
-        match key.code {
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Esc => {
-                if !self.cancel_loading() && !self.clear_filter() {
+        self.normal_key(key);
+    }
+
+    fn normal_key(&mut self, key: KeyEvent) {
+        let parsed = Key::from_event(&key);
+        if let Some(k) = parsed
+            && self.keys.vim()
+            && let Some(digit) = k.is_digit()
+            && (self.count.is_some() || (digit != 0 && !self.keys.is_bound(&k)))
+        {
+            let n = self
+                .count
+                .unwrap_or(0)
+                .saturating_mul(10)
+                .saturating_add(digit)
+                .min(9999);
+            self.count = Some(n);
+            self.pending_g = false;
+            self.set_status(n.to_string(), false);
+            return;
+        }
+        if let Some(k) = parsed
+            && self.keys.vim()
+            && k.is_char('g')
+            && !self.keys.is_bound(&k)
+        {
+            if self.pending_g {
+                self.pending_g = false;
+                let count = self.count.take();
+                self.go_to(count, false);
+            } else {
+                self.pending_g = true;
+            }
+            return;
+        }
+        self.pending_g = false;
+        let count = self.count.take();
+        let Some(action) = self.keys.action(&key) else {
+            return;
+        };
+        if action != Action::Remove {
+            self.pending_remove = None;
+        }
+        if self.visual.is_some() && !action.is_motion() {
+            self.visual = None;
+        }
+        self.run_action(action, count);
+        if self.visual.is_some() {
+            self.update_visual();
+        }
+    }
+
+    fn go_to(&mut self, count: Option<usize>, bottom: bool) {
+        let len = self.list_len();
+        if len == 0 {
+            return;
+        }
+        let index = match count {
+            Some(n) => n.saturating_sub(1).min(len - 1),
+            None if bottom => len - 1,
+            None => 0,
+        };
+        match self.tab {
+            Tab::Library | Tab::Playlists => self.library_state_mut().select(Some(index)),
+            Tab::Radio => self.radio_state.select(Some(index)),
+            Tab::Spotify => {}
+        }
+    }
+
+    fn half_page(&self) -> isize {
+        ((self.hit.body.height / 2).max(1)) as isize
+    }
+
+    fn run_action(&mut self, action: Action, count: Option<usize>) {
+        let n = count.unwrap_or(1).max(1);
+        match action {
+            Action::Quit => self.quit = true,
+            Action::Cancel => {
+                if self.visual.take().is_none() && !self.cancel_loading() && !self.clear_filter() {
                     self.close_playlist();
                 }
             }
-            KeyCode::Char('/') if self.tab == Tab::Library => self.filtering = true,
-            KeyCode::Char('R') => {
+            Action::Back => self.close_playlist(),
+            Action::Search => match self.tab {
+                Tab::Library => self.filtering = true,
+                Tab::Radio => self.open_finder(),
+                _ => {}
+            },
+            Action::Repeat => {
                 self.repeat = self.repeat.next();
                 self.set_status(format!("Repeat {}", self.repeat.label()), false);
             }
-            KeyCode::Char('Q') => self.queue_add(),
-            KeyCode::Char('Z') => {
+            Action::Queue => self.queue_add(),
+            Action::QueueView => {
                 let mut state = ListState::default();
                 if !self.up_next.is_empty() {
                     state.select(Some(0));
                 }
                 self.queue_view = Some(state);
             }
-            KeyCode::Char('?') => self.help = Some(0),
-            KeyCode::Backspace => self.close_playlist(),
-            KeyCode::Char('a') if self.in_folders() => self.toggle_mark(),
-            KeyCode::Char('A') if self.in_folders() => self.toggle_mark_all(),
-            KeyCode::Char('S') if self.in_folders() => self.next_sort(),
-            KeyCode::Char('d') if self.in_open_playlist() => self.toggle_track_mark(),
-            KeyCode::Char('D') if self.in_open_playlist() => self.toggle_track_mark_all(),
-            KeyCode::Char('w') if self.in_folders() => self.save_marked(),
-            KeyCode::Char('a') if self.in_playlists() => self.add_to_playlist(),
-            KeyCode::Char('x') if self.in_playlists() => self.remove_from_playlists(),
-            KeyCode::Char('e') if self.in_playlists() => self.open_selected_playlist(),
-            KeyCode::Char('i') if self.in_playlists() => self.open_import_prompt(),
-            KeyCode::Char('E') if self.in_playlists() => self.open_export_prompt(),
-            KeyCode::Char('z') => self.cycle_sleep(),
-            KeyCode::Char('y') => self.cycle_eq(),
-            KeyCode::Char('L') => self.toggle_lyrics(),
-            KeyCode::Char('v') => self.next_visualizer(),
-            KeyCode::Char('c') => self.toggle_clock(),
-            KeyCode::Char('o') => self.open_picker(),
-            KeyCode::Char('/') if self.tab == Tab::Radio => self.open_finder(),
-            KeyCode::Char('x') if self.tab == Tab::Radio => self.remove_station(),
-            KeyCode::Tab => self.switch_tab(true),
-            KeyCode::BackTab => self.switch_tab(false),
-            KeyCode::Char('1') => self.tab = Tab::Library,
-            KeyCode::Char('2') => self.tab = Tab::Playlists,
-            KeyCode::Char('3') => self.tab = Tab::Radio,
-            KeyCode::Char('4') => self.tab = Tab::Spotify,
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::PageUp => self.move_selection(-10),
-            KeyCode::PageDown => self.move_selection(10),
-            KeyCode::Home | KeyCode::Char('g') => self.select_edge(false),
-            KeyCode::End | KeyCode::Char('G') => self.select_edge(true),
-            KeyCode::Enter => self.play_selected(),
-            KeyCode::Char(' ') => self.toggle_pause(),
-            KeyCode::Char('n') => self.step(true),
-            KeyCode::Char('p') => self.step(false),
-            KeyCode::Right | KeyCode::Char('l') => self.seek(true),
-            KeyCode::Left | KeyCode::Char('h') => self.seek(false),
-            KeyCode::Char('+') | KeyCode::Char('=') => self.change_volume(0.05),
-            KeyCode::Char('-') | KeyCode::Char('_') => self.change_volume(-0.05),
-            KeyCode::Char('m') => self.toggle_mute(),
-            KeyCode::Char('t') | KeyCode::Char('T') => self.open_theme_picker(),
-            KeyCode::Char('r') => self.reload_config(),
-            KeyCode::Char('s') => {
-                self.shuffle = !self.shuffle;
-                let label = if self.shuffle {
-                    "Shuffle on"
-                } else {
-                    "Shuffle off"
-                };
-                self.set_status(label, false);
+            Action::Help => self.help = Some(0),
+            Action::Mark => {
+                if self.in_folders() {
+                    self.toggle_mark();
+                } else if self.in_playlists() {
+                    self.add_to_playlist();
+                }
             }
+            Action::MarkAll if self.in_folders() => self.toggle_mark_all(),
+            Action::Sort if self.in_folders() => self.next_sort(),
+            Action::TrackMark if self.in_open_playlist() => self.toggle_track_mark(),
+            Action::TrackMarkAll if self.in_open_playlist() => self.toggle_track_mark_all(),
+            Action::Save if self.in_folders() => self.save_marked(),
+            Action::Remove => {
+                if self.in_playlists() {
+                    self.remove_from_playlists();
+                } else if self.tab == Tab::Radio {
+                    self.remove_station();
+                }
+            }
+            Action::OpenList if self.in_playlists() => self.open_selected_playlist(),
+            Action::Import if self.in_playlists() => self.open_import_prompt(),
+            Action::Export if self.in_playlists() => self.open_export_prompt(),
+            Action::Sleep => self.cycle_sleep(),
+            Action::Eq => self.cycle_eq(),
+            Action::Lyrics => self.toggle_lyrics(),
+            Action::Visualizer => self.next_visualizer(),
+            Action::Clock => self.toggle_clock(),
+            Action::Folder => self.open_picker(),
+            Action::TabNext => self.switch_tab(true),
+            Action::TabPrev => self.switch_tab(false),
+            Action::Tab1 => self.tab = Tab::Library,
+            Action::Tab2 => self.tab = Tab::Playlists,
+            Action::Tab3 => self.tab = Tab::Radio,
+            Action::Tab4 => self.tab = Tab::Spotify,
+            Action::Up => self.move_selection(-(n as isize)),
+            Action::Down => self.move_selection(n as isize),
+            Action::PageUp => self.move_selection(-10 * n as isize),
+            Action::PageDown => self.move_selection(10 * n as isize),
+            Action::HalfUp => self.move_selection(-self.half_page() * n as isize),
+            Action::HalfDown => self.move_selection(self.half_page() * n as isize),
+            Action::Top => self.go_to(count, false),
+            Action::Bottom => self.go_to(count, true),
+            Action::Play => self.play_selected(),
+            Action::Pause => self.toggle_pause(),
+            Action::Next => (0..n).for_each(|_| self.step(true)),
+            Action::Prev => (0..n).for_each(|_| self.step(false)),
+            Action::SeekForward => (0..n).for_each(|_| self.seek(true)),
+            Action::SeekBack => (0..n).for_each(|_| self.seek(false)),
+            Action::VolumeUp => self.change_volume(0.05 * n as f32),
+            Action::VolumeDown => self.change_volume(-0.05 * n as f32),
+            Action::Mute => self.toggle_mute(),
+            Action::Theme => self.open_theme_picker(),
+            Action::Reload => self.reload_config(),
+            Action::Shuffle => self.set_shuffle(!self.shuffle),
+            Action::Visual => self.toggle_visual(),
+            Action::Command => self.cmdline = Some(String::new()),
+            Action::Stats => self.toggle_stats(),
             _ => {}
+        }
+    }
+
+    fn toggle_stats(&mut self) {
+        if self.stats.take().is_none() {
+            let mut stats = Stats::new();
+            stats.refresh();
+            self.stats = Some(stats);
+        }
+    }
+
+    pub fn stats_badge(&self) -> Option<String> {
+        self.stats.as_ref().map(Stats::badge)
+    }
+
+    pub fn visual_active(&self) -> bool {
+        self.visual.is_some()
+    }
+
+    fn toggle_visual(&mut self) {
+        if self.visual.take().is_some() {
+            return;
+        }
+        let anchor = if self.tab == Tab::Library {
+            self.library_state.selected()
+        } else if self.in_open_playlist() {
+            self.playlist_track_state.selected()
+        } else {
+            None
+        };
+        let Some(anchor) = anchor else {
+            self.set_status(
+                "Visual selection works in the Library and in open playlists",
+                false,
+            );
+            return;
+        };
+        self.visual = Some(Visual {
+            anchor,
+            base: self.marked.clone(),
+            base_index: self.marked_tracks.clone(),
+        });
+        self.update_visual();
+    }
+
+    fn update_visual(&mut self) {
+        let Some(visual) = self.visual.as_ref() else {
+            return;
+        };
+        let current = if self.tab == Tab::Library {
+            self.library_state.selected()
+        } else {
+            self.playlist_track_state.selected()
+        };
+        let Some(current) = current else {
+            return;
+        };
+        let (lo, hi) = (visual.anchor.min(current), visual.anchor.max(current));
+        if self.tab == Tab::Library {
+            let mut marked = visual.base.clone();
+            marked.extend(
+                self.tracks
+                    .iter()
+                    .skip(lo)
+                    .take(hi + 1 - lo)
+                    .map(|t| t.path.clone()),
+            );
+            self.marked = marked;
+        } else {
+            let mut marked = visual.base_index.clone();
+            marked.extend(lo..=hi);
+            self.marked_tracks = marked;
+        }
+    }
+
+    fn set_shuffle(&mut self, on: bool) {
+        self.shuffle = on;
+        self.set_status(if on { "Shuffle on" } else { "Shuffle off" }, false);
+    }
+
+    fn cmdline_key(&mut self, key: KeyEvent) {
+        let Some(input) = self.cmdline.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.cmdline = None,
+            KeyCode::Enter => {
+                let line = self.cmdline.take().unwrap_or_default();
+                self.run_command(&line);
+            }
+            KeyCode::Backspace => {
+                if input.pop().is_none() {
+                    self.cmdline = None;
+                }
+            }
+            KeyCode::Tab => {
+                if let Some(done) = commands::complete(input) {
+                    *input = done;
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => input.push(c),
+            _ => {}
+        }
+    }
+
+    fn run_command(&mut self, line: &str) {
+        let (name, args) = commands::split(line);
+        if name.is_empty() {
+            return;
+        }
+        let Some(command) = commands::canonical(&name) else {
+            self.set_status(format!("Unknown command: {name}"), true);
+            return;
+        };
+        let arg = args.first().map(String::as_str);
+        match command {
+            "quit" => self.quit = true,
+            "help" => self.help = Some(0),
+            "sort" => match arg {
+                None => self.next_sort(),
+                Some(text) => match library::SortKey::from_name(text) {
+                    Some(sort) => self.set_sort(sort),
+                    None => self.set_status("Sort by path, title, artist or album", true),
+                },
+            },
+            "sleep" => match arg {
+                None => self.cycle_sleep(),
+                Some("off") | Some("0") => self.set_sleep(0),
+                Some(text) => match text.parse::<u64>() {
+                    Ok(minutes) if minutes <= 600 => self.set_sleep(minutes),
+                    _ => self.set_status("Usage: sleep <minutes>|off", true),
+                },
+            },
+            "eq" => match arg {
+                None => self.cycle_eq(),
+                Some(text) => match crate::eq::PRESETS
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(text))
+                {
+                    Some((preset, _)) => self.set_eq(preset),
+                    None => {
+                        let names: Vec<&str> = crate::eq::PRESETS.iter().map(|(n, _)| *n).collect();
+                        self.set_status(format!("Presets: {}", names.join(", ")), true);
+                    }
+                },
+            },
+            "repeat" => match arg {
+                None => {
+                    self.repeat = self.repeat.next();
+                    self.set_status(format!("Repeat {}", self.repeat.label()), false);
+                }
+                Some(text @ ("off" | "all" | "one")) => {
+                    self.repeat = Repeat::from_name(text);
+                    self.set_status(format!("Repeat {}", self.repeat.label()), false);
+                }
+                Some(_) => self.set_status("Usage: repeat off|all|one", true),
+            },
+            "shuffle" => match arg {
+                None => self.set_shuffle(!self.shuffle),
+                Some("on") => self.set_shuffle(true),
+                Some("off") => self.set_shuffle(false),
+                Some(_) => self.set_status("Usage: shuffle on|off", true),
+            },
+            "volume" => match arg.and_then(|a| a.trim_end_matches('%').parse::<u32>().ok()) {
+                Some(percent) if percent <= 100 => self.set_volume_to(percent as f32 / 100.0),
+                _ => self.set_status("Usage: volume 0-100", true),
+            },
+            "lyrics" => self.toggle_lyrics(),
+            "theme" => match arg {
+                None => self.open_theme_picker(),
+                Some(_) => self.set_theme(&args.join(" ")),
+            },
+            "viz" => match arg {
+                None => self.next_visualizer(),
+                Some(text) => match config::VizStyle::from_name(text) {
+                    Some(style) => self.set_visualizer(style),
+                    None => {
+                        let names: Vec<&str> =
+                            config::VizStyle::ALL.iter().map(|s| s.name()).collect();
+                        self.set_status(format!("Styles: {}", names.join(", ")), true);
+                    }
+                },
+            },
+            "clock" => self.toggle_clock(),
+            "reload" => self.reload_config(),
+            "folder" => self.open_picker(),
+            "import" => {
+                self.tab = Tab::Playlists;
+                self.open_import_prompt();
+            }
+            "export" => {
+                self.tab = Tab::Playlists;
+                self.open_export_prompt();
+            }
+            "save" => {
+                self.tab = Tab::Library;
+                self.save_marked();
+            }
+            "tab" => {
+                let tab = match arg.map(str::to_ascii_lowercase).as_deref() {
+                    Some("1" | "library") => Some(Tab::Library),
+                    Some("2" | "playlists") => Some(Tab::Playlists),
+                    Some("3" | "radio") => Some(Tab::Radio),
+                    Some("4" | "spotify") => Some(Tab::Spotify),
+                    _ => None,
+                };
+                match tab {
+                    Some(tab) => self.tab = tab,
+                    None => self.set_status("Usage: tab library|playlists|radio|spotify", true),
+                }
+            }
+            "play" => {
+                if !self.is_playing() {
+                    self.toggle_pause();
+                }
+            }
+            "pause" => {
+                if self.is_playing() {
+                    self.toggle_pause();
+                }
+            }
+            "next" => self.step(true),
+            "prev" => self.step(false),
+            "stop" => self.handle_media(crate::media::Command::Stop),
+            "seek" => match arg.and_then(commands::parse_seek) {
+                Some(SeekTo::Absolute(position)) => {
+                    self.handle_media(crate::media::Command::SetPosition(position))
+                }
+                Some(SeekTo::Relative(secs)) => {
+                    self.handle_media(crate::media::Command::SeekBy(secs))
+                }
+                None => self.set_status("Usage: seek 1:30 | +10 | -10", true),
+            },
+            "queue" => self.queue_add(),
+            "stats" => {
+                if self.stats.is_none() {
+                    self.toggle_stats();
+                }
+                let detail = self.stats.as_ref().map(Stats::detail).unwrap_or_default();
+                self.set_status(detail, false);
+            }
+            "keys" => self.keys_command(arg),
+            "reset" => match arg {
+                Some(action) => self.reset_key(action),
+                None => self.set_status("Usage: reset <action>", true),
+            },
+            "map" => self.map_command(&args),
+            "unmap" => match args.first() {
+                Some(action) => self.bind_keys(action, Vec::new()),
+                None => self.set_status("Usage: unmap <action>", true),
+            },
+            _ => {}
+        }
+    }
+
+    fn map_command(&mut self, args: &[String]) {
+        match args {
+            [] => self.set_status("Usage: map <action> <key>...", true),
+            [name] => match keys::action_by_name(name) {
+                Some(action) => {
+                    let text = format!("{}: {}", keys::action_name(action), self.keys.all(action));
+                    self.set_status(text, false);
+                }
+                None => self.set_status(format!("Unknown action: {name}"), true),
+            },
+            [name, rest @ ..] => self.bind_keys(name, rest.to_vec()),
+        }
+    }
+
+    fn bind_keys(&mut self, name: &str, keys_list: Vec<String>) {
+        let Some(action) = keys::action_by_name(name) else {
+            self.set_status(format!("Unknown action: {name}"), true);
+            return;
+        };
+        let action_name = keys::action_name(action);
+        let mut stolen = Vec::new();
+        for text in &keys_list {
+            match Key::parse(text) {
+                Some(key) => {
+                    if let Some(other) = self.keys.lookup(&key)
+                        && other != action
+                    {
+                        stolen.push(keys::action_name(other));
+                    }
+                }
+                None => {
+                    self.set_status(format!("Invalid key: {text}"), true);
+                    return;
+                }
+            }
+        }
+        let base = if self.config.keys.preset == "custom" {
+            self.config.keys.base.clone()
+        } else if self.config.keys.preset == "vim" {
+            "vim".to_string()
+        } else {
+            "crab".to_string()
+        };
+        if let Err(error) = config::pick_custom_key(action_name, &keys_list, &base) {
+            self.set_status(format!("Not saved: {error:#}"), true);
+            return;
+        }
+        self.config.keys.preset = "custom".to_string();
+        self.config.keys.base = base.clone();
+        self.config.keys.custom.insert(
+            action_name.to_string(),
+            config::KeyList::Many(keys_list.clone()),
+        );
+        let (map, _) = self.config.keymap();
+        self.keys = map;
+        let mut text = if keys_list.is_empty() {
+            format!("{action_name} unbound (custom keys, base {base})")
+        } else {
+            format!(
+                "{action_name}: {} (custom keys, base {base})",
+                keys_list.join(" ")
+            )
+        };
+        stolen.dedup();
+        if !stolen.is_empty() {
+            text.push_str(&format!(", taken from {}", stolen.join(", ")));
+        }
+        self.set_status(text, false);
+    }
+
+    fn keys_command(&mut self, arg: Option<&str>) {
+        let Some(name) = arg else {
+            let text = format!("Key preset: {}", self.config.keys.preset);
+            self.set_status(text, false);
+            return;
+        };
+        let Some(preset) = keys::Preset::from_name(name) else {
+            self.set_status("Usage: keys crab|vim|custom", true);
+            return;
+        };
+        if let Err(error) = config::pick_preset(preset.name()) {
+            self.set_status(format!("Not saved: {error:#}"), true);
+            return;
+        }
+        self.config.keys.preset = preset.name().to_string();
+        let (map, warnings) = self.config.keymap();
+        self.keys = map;
+        match warnings.first() {
+            Some(warning) => self.set_status(warning.clone(), true),
+            None => self.set_status(format!("Key preset: {}", preset.name()), false),
+        }
+    }
+
+    fn reset_key(&mut self, name: &str) {
+        let Some(action) = keys::action_by_name(name) else {
+            self.set_status(format!("Unknown action: {name}"), true);
+            return;
+        };
+        let action_name = keys::action_name(action);
+        if let Err(error) = config::reset_custom_key(action_name) {
+            self.set_status(format!("Not saved: {error:#}"), true);
+            return;
+        }
+        self.config.keys.custom.remove(action_name);
+        let (map, _) = self.config.keymap();
+        self.keys = map;
+        self.set_status(format!("{action_name} back to the base keys"), false);
+    }
+
+    fn set_volume_to(&mut self, volume: f32) {
+        match &self.sysvol {
+            Some(sys) => {
+                self.volume = volume.clamp(0.0, 1.0);
+                sys.send(Request::Set(self.volume));
+            }
+            None => {
+                self.engine.set_volume(volume);
+                self.volume = self.engine.volume();
+            }
+        }
+    }
+
+    fn set_theme(&mut self, name: &str) {
+        let Some(index) = self
+            .themes
+            .iter()
+            .position(|t| t.name.eq_ignore_ascii_case(name))
+        else {
+            let names: Vec<&str> = self.themes.iter().map(|t| t.name.as_str()).collect();
+            self.set_status(format!("Themes: {}", names.join(", ")), true);
+            return;
+        };
+        self.theme_index = index;
+        let name = self.theme().name.clone();
+        match config::pick_theme(&name) {
+            Ok(()) => {
+                self.config.theme = name.clone();
+                self.set_status(format!("Theme: {name}"), false);
+            }
+            Err(error) => self.set_status(format!("Theme {name} not saved: {error:#}"), true),
         }
     }
 
@@ -1873,6 +2376,10 @@ impl App {
             Some(m) if m <= 60 => 90,
             Some(_) => 0,
         };
+        self.set_sleep(minutes);
+    }
+
+    fn set_sleep(&mut self, minutes: u64) {
         if minutes == 0 {
             self.sleep_at = None;
             self.set_status("Sleep timer off", false);
@@ -2593,6 +3100,10 @@ impl App {
 
     fn next_sort(&mut self) {
         let sort = self.config.library.sort.next();
+        self.set_sort(sort);
+    }
+
+    fn set_sort(&mut self, sort: library::SortKey) {
         self.config.library.sort = sort;
         library::sort_tracks(&mut self.all_tracks, sort);
         self.rebuild_view();
@@ -2615,6 +3126,10 @@ impl App {
 
     fn next_visualizer(&mut self) {
         let style = self.config.visualizer.style.next();
+        self.set_visualizer(style);
+    }
+
+    fn set_visualizer(&mut self, style: config::VizStyle) {
         self.config.visualizer.style = style;
         match config::pick_visualizer(style) {
             Ok(()) => self.set_status(format!("Visualizer: {}", style.name()), false),

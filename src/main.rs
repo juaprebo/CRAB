@@ -2,11 +2,13 @@ mod analyzer;
 mod app;
 mod art;
 mod clock;
+mod commands;
 mod config;
 mod cover;
 mod engine;
 mod eq;
 mod finder;
+mod keys;
 mod library;
 mod lyrics;
 mod media;
@@ -20,6 +22,7 @@ mod spotify;
 #[path = "spotify_stub.rs"]
 mod spotify;
 mod state;
+mod stats;
 mod sysvol;
 #[cfg(test)]
 mod testutil;

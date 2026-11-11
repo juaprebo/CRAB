@@ -54,7 +54,7 @@ pub enum VizStyle {
 }
 
 impl VizStyle {
-    const ALL: [VizStyle; 6] = [
+    pub const ALL: [VizStyle; 6] = [
         VizStyle::Bars,
         VizStyle::Mirror,
         VizStyle::Line,
@@ -62,6 +62,13 @@ impl VizStyle {
         VizStyle::Wave,
         VizStyle::Waterfall,
     ];
+
+    pub fn from_name(name: &str) -> Option<VizStyle> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|s| s.name().eq_ignore_ascii_case(name))
+    }
 
     pub fn name(self) -> &'static str {
         match self {
@@ -164,6 +171,40 @@ impl AudioConfig {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum KeyList {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl KeyList {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            KeyList::One(key) => vec![key],
+            KeyList::Many(keys) => keys,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct KeysConfig {
+    pub preset: String,
+    pub base: String,
+    pub custom: BTreeMap<String, KeyList>,
+}
+
+impl Default for KeysConfig {
+    fn default() -> Self {
+        Self {
+            preset: "crab".to_string(),
+            base: "crab".to_string(),
+            custom: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ScrobbleConfig {
@@ -201,6 +242,7 @@ pub struct Config {
     pub library: LibraryConfig,
     pub audio: AudioConfig,
     pub scrobble: ScrobbleConfig,
+    pub keys: KeysConfig,
     pub themes: BTreeMap<String, CustomTheme>,
 }
 
@@ -217,6 +259,7 @@ impl Default for Config {
             library: LibraryConfig::default(),
             audio: AudioConfig::default(),
             scrobble: ScrobbleConfig::default(),
+            keys: KeysConfig::default(),
             themes: BTreeMap::new(),
         }
     }
@@ -364,6 +407,54 @@ pub fn pick_sort(sort: SortKey) -> Result<()> {
     edit_config(|text| set_section_key(text, "library", "sort", sort.name()))
 }
 
+pub fn pick_custom_key(action: &str, keys: &[String], base: &str) -> Result<()> {
+    let array = toml::Value::Array(
+        keys.iter()
+            .map(|k| toml::Value::String(k.clone()))
+            .collect(),
+    );
+    edit_config(|text| {
+        let with_key = set_section_line(text, "keys.custom", action, &array.to_string());
+        let with_preset = set_section_key(&with_key, "keys", "preset", "custom");
+        set_section_key(&with_preset, "keys", "base", base)
+    })
+}
+
+pub fn reset_custom_key(action: &str) -> Result<()> {
+    edit_config(|text| remove_section_line(text, "keys.custom", action))
+}
+
+pub fn pick_preset(name: &str) -> Result<()> {
+    edit_config(|text| set_section_key(text, "keys", "preset", name))
+}
+
+fn remove_section_line(text: &str, section: &str, key: &str) -> String {
+    let header = format!("[{section}]");
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(start) = lines.iter().position(|l| l.trim() == header) else {
+        return text.to_string();
+    };
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| is_header(l))
+        .map_or(lines.len(), |offset| start + 1 + offset);
+    let mut out = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let is_target = index > start
+            && index < end
+            && line
+                .trim_start()
+                .strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with('='));
+        if !is_target {
+            out.push(*line);
+        }
+    }
+    let mut result = out.join("\n");
+    result.push('\n');
+    result
+}
+
 pub fn pick_eq(name: &str) -> Result<()> {
     edit_config(|text| set_section_key(text, "audio", "eq", name))
 }
@@ -412,6 +503,27 @@ impl Config {
                 (Config::default(), None)
             }
         }
+    }
+
+    pub fn keymap(&self) -> (crate::keys::Keymap, Vec<String>) {
+        use crate::keys::Preset;
+        let mut warnings = Vec::new();
+        let preset = Preset::from_name(&self.keys.preset).unwrap_or_else(|| {
+            warnings.push(format!("unknown key preset \"{}\"", self.keys.preset));
+            Preset::Crab
+        });
+        let base = Preset::from_name(&self.keys.base)
+            .filter(|b| *b != Preset::Custom)
+            .unwrap_or(Preset::Crab);
+        let custom: BTreeMap<String, Vec<String>> = self
+            .keys
+            .custom
+            .iter()
+            .map(|(name, keys)| (name.clone(), keys.clone().into_vec()))
+            .collect();
+        let (map, mut more) = crate::keys::Keymap::build(preset, base, &custom);
+        warnings.append(&mut more);
+        (map, warnings)
     }
 
     pub fn build_themes(&self) -> Vec<Theme> {

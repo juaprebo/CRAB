@@ -153,6 +153,17 @@ pub enum SortKey {
 }
 
 impl SortKey {
+    pub fn from_name(name: &str) -> Option<SortKey> {
+        [
+            SortKey::Path,
+            SortKey::Title,
+            SortKey::Artist,
+            SortKey::Album,
+        ]
+        .into_iter()
+        .find(|s| s.name().eq_ignore_ascii_case(name))
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             SortKey::Path => "path",
