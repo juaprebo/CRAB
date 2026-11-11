@@ -1,4 +1,5 @@
 use crate::art::Art;
+use crate::library::SortKey;
 use crate::theme::{CustomTheme, Theme, builtin_themes, resolve, toml_key};
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
@@ -8,12 +9,30 @@ use std::path::PathBuf;
 const DEFAULT_CONFIG: &str = r##"theme = "crab"
 show_art = true
 art_strength = 0.35
+mouse = true
 
 [visualizer]
 style = "bars"
 bar_width = 2
 gap = 1
 peaks = true
+
+[clock]
+show = false
+hour12 = false
+seconds = true
+
+[library]
+sort = "path"
+
+[audio]
+replaygain = true
+gapless = true
+crossfade = 0.0
+eq = "flat"
+
+[scrobble]
+listenbrainz_token = ""
 
 [themes.example]
 base = "synthwave"
@@ -102,6 +121,73 @@ impl VisualizerConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct LibraryConfig {
+    pub sort: SortKey,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct AudioConfig {
+    pub replaygain: bool,
+    pub gapless: bool,
+    pub crossfade: f32,
+    pub eq: String,
+    pub eq_bands: Option<Vec<f32>>,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            replaygain: true,
+            gapless: true,
+            crossfade: 0.0,
+            eq: "flat".to_string(),
+            eq_bands: None,
+        }
+    }
+}
+
+impl AudioConfig {
+    pub fn eq_gains(&self) -> [f32; crate::eq::BANDS] {
+        if let Some(bands) = &self.eq_bands
+            && bands.len() == crate::eq::BANDS
+        {
+            return std::array::from_fn(|i| bands[i]);
+        }
+        crate::eq::preset(&self.eq).unwrap_or([0.0; crate::eq::BANDS])
+    }
+
+    pub fn fade(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f32(self.crossfade.clamp(0.0, 12.0))
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ScrobbleConfig {
+    pub listenbrainz_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct ClockConfig {
+    pub show: bool,
+    pub hour12: bool,
+    pub seconds: bool,
+}
+
+impl Default for ClockConfig {
+    fn default() -> Self {
+        Self {
+            show: false,
+            hour12: false,
+            seconds: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -109,7 +195,12 @@ pub struct Config {
     pub show_art: bool,
     pub art_file: Option<String>,
     pub art_strength: f32,
+    pub mouse: bool,
     pub visualizer: VisualizerConfig,
+    pub clock: ClockConfig,
+    pub library: LibraryConfig,
+    pub audio: AudioConfig,
+    pub scrobble: ScrobbleConfig,
     pub themes: BTreeMap<String, CustomTheme>,
 }
 
@@ -120,7 +211,12 @@ impl Default for Config {
             show_art: true,
             art_file: None,
             art_strength: 0.35,
+            mouse: true,
             visualizer: VisualizerConfig::default(),
+            clock: ClockConfig::default(),
+            library: LibraryConfig::default(),
+            audio: AudioConfig::default(),
+            scrobble: ScrobbleConfig::default(),
             themes: BTreeMap::new(),
         }
     }
@@ -158,6 +254,14 @@ pub fn set_key(text: &str, key: &str, value: &str) -> String {
 
 pub fn set_section_key(text: &str, section: &str, key: &str, value: &str) -> String {
     let encoded = toml::Value::String(value.to_string()).to_string();
+    set_section_line(text, section, key, &encoded)
+}
+
+pub fn set_section_bool(text: &str, section: &str, key: &str, value: bool) -> String {
+    set_section_line(text, section, key, &value.to_string())
+}
+
+fn set_section_line(text: &str, section: &str, key: &str, encoded: &str) -> String {
     let new_line = format!("{key} = {encoded}");
     let header = format!("[{section}]");
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
@@ -254,6 +358,18 @@ pub fn pick_theme(name: &str) -> Result<()> {
 
 pub fn pick_visualizer(style: VizStyle) -> Result<()> {
     edit_config(|text| set_section_key(text, "visualizer", "style", style.name()))
+}
+
+pub fn pick_sort(sort: SortKey) -> Result<()> {
+    edit_config(|text| set_section_key(text, "library", "sort", sort.name()))
+}
+
+pub fn pick_eq(name: &str) -> Result<()> {
+    edit_config(|text| set_section_key(text, "audio", "eq", name))
+}
+
+pub fn pick_clock(show: bool) -> Result<()> {
+    edit_config(|text| set_section_bool(text, "clock", "show", show))
 }
 
 pub fn save_theme(name: &str, section: &str) -> Result<()> {
@@ -398,6 +514,28 @@ mod tests {
 
         let empty = set_section_key("", "visualizer", "style", "line");
         assert_eq!(empty, "[visualizer]\nstyle = \"line\"\n");
+    }
+
+    #[test]
+    fn clock_config_and_toggle() {
+        let default: Config = toml::from_str("").unwrap();
+        assert!(!default.clock.show && !default.clock.hour12 && default.clock.seconds);
+        let parsed: Config =
+            toml::from_str("[clock]\nshow = true\nhour12 = true\nseconds = false\n").unwrap();
+        assert!(parsed.clock.show && parsed.clock.hour12 && !parsed.clock.seconds);
+
+        let on = set_section_bool("theme = \"nord\"\n", "clock", "show", true);
+        assert_eq!(on, "theme = \"nord\"\n\n[clock]\nshow = true\n");
+        let off = set_section_bool(&on, "clock", "show", false);
+        let config: Config = toml::from_str(&off).unwrap();
+        assert!(!config.clock.show);
+        assert_eq!(off.matches("[clock]").count(), 1);
+
+        let both = "[visualizer]\nstyle = \"wave\"\n\n[clock]\nhour12 = true\n";
+        let out = set_section_bool(both, "clock", "show", true);
+        let config: Config = toml::from_str(&out).unwrap();
+        assert!(config.clock.show && config.clock.hour12);
+        assert_eq!(config.visualizer.style, VizStyle::Wave);
     }
 
     #[test]

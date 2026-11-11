@@ -1,5 +1,6 @@
-use crate::app::{Active, App, SpotifyStatus, Tab};
+use crate::app::{Active, App, Repeat, SpotifyStatus, Tab};
 use crate::art::{self, Art, Cell};
+use crate::clock;
 use crate::config::Config;
 use crate::config::{VisualizerConfig, VizStyle};
 use crate::finder::{Finder, Focus};
@@ -20,6 +21,7 @@ use ratatui::widgets::{
 };
 use std::time::Duration;
 
+const TABS_WIDTH: u16 = 50;
 const BLOCKS: [char; 8] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'];
 
 pub fn bar_count(width: u16, config: &VisualizerConfig) -> usize {
@@ -121,9 +123,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     .areas(area);
 
     draw_header(frame, header, app, &theme);
+    app.hit.tabs = locate_tabs(frame.buffer_mut(), header);
+    app.hit.body = body;
 
     match app.tab {
         Tab::Library => draw_library(frame, body, app, &theme),
+        Tab::Playlists => draw_playlists(frame, body, app, &theme),
         Tab::Radio => draw_radio(frame, body, app, &theme),
         Tab::Spotify => draw_spotify(frame, body, app, &theme),
     }
@@ -134,6 +139,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(picker) = app.picker.as_mut() {
         draw_picker(frame, area, picker, &theme);
     }
+    draw_name_prompt(frame, area, app, &theme);
+    draw_queue_view(frame, area, app, &theme);
+    draw_help(frame, area, app, &theme);
+    draw_lyrics(frame, area, app, &theme);
     if let Some(finder) = app.finder.as_mut() {
         draw_finder(frame, area, finder, &theme);
     }
@@ -514,18 +523,40 @@ fn draw_art(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let cells: Vec<Cell> = match art {
-        Art::Crab => art::crab_cells(inner.width, inner.height),
-        Art::Text(lines) => art::text_cells(lines, inner.width, inner.height),
+    let cells: Vec<Cell> = match (&app.cover, art) {
+        (Some(cover), _) => cover.cells(inner.width, inner.height),
+        (None, Art::Crab) => art::crab_cells(inner.width, inner.height),
+        (None, Art::Text(lines)) => art::text_cells(lines, inner.width, inner.height),
     };
-    let strength = app.config.art_strength();
+    paint_art(
+        frame.buffer_mut(),
+        &cells,
+        inner,
+        theme,
+        app.config.art_strength(),
+    );
+}
+
+fn cover_color(rgb: [u8; 3], base: Color, strength: f32) -> Color {
+    let (br, bg, bb) = match base {
+        Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
+        _ => (16.0, 16.0, 20.0),
+    };
+    let t = (strength * 1.6).clamp(0.12, 0.85);
+    let mix = |from: f32, to: u8| (from + (to as f32 - from) * t).round() as u8;
+    Color::Rgb(mix(br, rgb[0]), mix(bg, rgb[1]), mix(bb, rgb[2]))
+}
+
+fn paint_art(buf: &mut Buffer, cells: &[Cell], inner: Rect, theme: &Theme, strength: f32) {
     let base_bg = theme.background.unwrap_or(Color::Reset);
-    let buf = frame.buffer_mut();
     for cell in cells {
         let x = inner.x + cell.x;
         let y = inner.y + cell.y;
         let target = &buf[(x, y)];
-        if target.symbol() != " " || target.style().bg.unwrap_or(Color::Reset) != base_bg {
+        let bg = target.style().bg.unwrap_or(Color::Reset);
+        let blank = target.symbol() == " ";
+        let on_bar = blank && bg == theme.accent;
+        if !blank || (bg != base_bg && !on_bar) {
             continue;
         }
         let space_left = x == inner.x || buf[(x - 1, y)].symbol() == " ";
@@ -533,9 +564,23 @@ fn draw_art(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         if !(space_left || space_right) {
             continue;
         }
-        buf[(x, y)]
-            .set_char(cell.symbol)
-            .set_fg(theme.art_color(1.0 - cell.depth, strength));
+        if let Some((top, bottom)) = cell.rgb {
+            if on_bar {
+                continue;
+            }
+            let (fg, bg) = (
+                cover_color(top, base_bg, strength),
+                cover_color(bottom, base_bg, strength),
+            );
+            buf[(x, y)].set_char(cell.symbol).set_fg(fg).set_bg(bg);
+            continue;
+        }
+        let color = if on_bar {
+            theme.art_on_accent(strength)
+        } else {
+            theme.art_color(1.0 - cell.depth, strength)
+        };
+        buf[(x, y)].set_char(cell.symbol).set_fg(color);
     }
 }
 
@@ -552,7 +597,14 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &mut Picker, theme: &Theme
         height,
     );
     frame.render_widget(Clear, rect);
-    let mut block = panel(theme, "Open folder".to_string());
+    let mut block = panel(
+        theme,
+        if picker.files {
+            "Add to playlist".to_string()
+        } else {
+            "Open folder".to_string()
+        },
+    );
     if let Some(background) = theme.background {
         block = block.style(Style::default().bg(background));
     }
@@ -587,7 +639,13 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &mut Picker, theme: &Theme
             let label = if name == ".." {
                 "↰ ..".to_string()
             } else {
-                format!("▸ {name}")
+                let marked = picker.marked.contains(&picker.dir.join(name));
+                let mark = if marked { "+" } else { " " };
+                if picker.is_dir_entry(name) {
+                    format!("{mark}▸ {name}")
+                } else {
+                    format!("{mark}♪ {name}")
+                }
             };
             ListItem::new(Line::styled(label, Style::default().fg(theme.text)))
         })
@@ -600,6 +658,11 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &mut Picker, theme: &Theme
 
     let help = if let Some(error) = &picker.error {
         Line::styled(error.clone(), Style::default().fg(theme.error))
+    } else if picker.files {
+        Line::styled(
+            "⏎ open folder or add file  space mark  a add marked  A add all here  ⌫ up  ~ home  / type path  esc done",
+            Style::default().fg(theme.dim),
+        )
     } else {
         Line::styled(
             "⏎ open  ⌫ up  space use this folder  a add  ~ home  / type path  . hidden  esc cancel",
@@ -732,14 +795,63 @@ fn draw_finder(frame: &mut Frame, area: Rect, finder: &mut Finder, theme: &Theme
     );
 }
 
+fn locate_tabs(buf: &Buffer, header: Rect) -> Vec<(Rect, Tab)> {
+    let row: Vec<&str> = (header.x..header.x + header.width)
+        .map(|x| buf[(x, header.y)].symbol())
+        .collect();
+    let mut found = Vec::new();
+    for (i, tab) in Tab::ALL.iter().enumerate() {
+        let label = format!("{} {}", i + 1, tab.label());
+        let chars: Vec<String> = label.chars().map(|c| c.to_string()).collect();
+        let start = (0..row.len().saturating_sub(chars.len() - 1))
+            .find(|&at| chars.iter().enumerate().all(|(k, c)| row[at + k] == c));
+        if let Some(at) = start {
+            let x = header.x + at as u16;
+            found.push((
+                Rect::new(x.saturating_sub(1), header.y, label.len() as u16 + 2, 1),
+                *tab,
+            ));
+        }
+    }
+    found
+}
+
 fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let wide = area.width >= 72;
-    let [logo, tabs, theme_name] = Layout::horizontal([
-        Constraint::Length(if wide { 26 } else { 10 }),
+    let logo_width = if wide { 26 } else { 10 };
+    let theme_width = theme.name.chars().count() as u16 + 4;
+    let clock_text = if app.config.clock.show {
+        let text = clock::format_clock(
+            clock::local_time(),
+            app.config.clock.hour12,
+            app.config.clock.seconds,
+        );
+        let width = text.chars().count() as u16 + 2;
+        let room = area.width.saturating_sub(logo_width + theme_width);
+        (room >= TABS_WIDTH + width).then_some((text, width))
+    } else {
+        None
+    };
+    let clock_width = clock_text.as_ref().map(|(_, width)| *width).unwrap_or(0);
+    let [logo, tabs, clock_area, theme_name] = Layout::horizontal([
+        Constraint::Length(logo_width),
         Constraint::Min(10),
-        Constraint::Length(theme.name.chars().count() as u16 + 4),
+        Constraint::Length(clock_width),
+        Constraint::Length(theme_width),
     ])
     .areas(area);
+    if let Some((text, _)) = clock_text {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                text,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Right),
+            clock_area,
+        );
+    }
     let mut logo_spans = vec![
         Span::styled(" ▟█▙ ", Style::default().fg(theme.accent)),
         Span::styled(
@@ -791,10 +903,25 @@ fn highlight(theme: &Theme) -> Style {
 
 fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let folders = app.roots_label();
+    let marked = if app.marked.is_empty() {
+        String::new()
+    } else {
+        format!(" - {} marked", app.marked.len())
+    };
+    let filter = if app.filtering {
+        format!(" - filter: {}█", app.filter)
+    } else if app.filter.is_empty() {
+        String::new()
+    } else {
+        format!(" - filter: {}", app.filter)
+    };
     let title = if app.scanning {
         format!("Library - {folders} - scanning")
     } else {
-        format!("Library - {folders} - {} tracks", app.tracks.len())
+        format!(
+            "Library - {folders} - {} tracks{marked}{filter}",
+            app.tracks.len()
+        )
     };
     let items: Vec<ListItem> = app
         .tracks
@@ -802,7 +929,13 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         .enumerate()
         .map(|(i, track)| {
             let playing = app.active == Active::Local(i);
-            let marker = if playing { "♪ " } else { "  " };
+            let marker = if playing {
+                "♪ "
+            } else if app.marked.contains(&track.path) {
+                "+ "
+            } else {
+                "  "
+            };
             let title_style = if playing {
                 Style::default()
                     .fg(theme.accent)
@@ -814,7 +947,7 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
                 Span::styled(marker, Style::default().fg(theme.accent)),
                 Span::styled(track.title.clone(), title_style),
                 Span::styled(
-                    format!("   {}", track.folder),
+                    format!("   {}", track.detail()),
                     Style::default().fg(theme.dim),
                 ),
             ]))
@@ -826,6 +959,11 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
             "Scanning for audio files..."
         } else {
             "No audio files found. Press o to choose a folder"
+        };
+        let message = if app.filter.is_empty() {
+            message
+        } else {
+            "Nothing matches the filter"
         };
         frame.render_widget(
             Paragraph::new(message)
@@ -842,6 +980,396 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
             .highlight_style(highlight(theme)),
         area,
         &mut app.library_state,
+    );
+}
+
+fn draw_playlists(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    let row_width = area.width.saturating_sub(4) as usize;
+    let (title, items, message): (String, Vec<ListItem>, &str) = match app.open_playlist {
+        None => {
+            let items = app
+                .playlists
+                .iter()
+                .map(|list| {
+                    let playing =
+                        matches!(app.active, Active::Queue(_)) && app.queue_name() == list.name;
+                    let count = format!("{} tracks", list.tracks.len());
+                    let name_width = row_width.saturating_sub(count.chars().count() + 4);
+                    let name = truncate(&list.name, name_width);
+                    let pad = row_width
+                        .saturating_sub(name.chars().count() + count.chars().count() + 2)
+                        .max(1);
+                    let name_style = if playing {
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.text)
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            if playing { "♪ " } else { "≡ " },
+                            Style::default().fg(theme.accent),
+                        ),
+                        Span::styled(name, name_style),
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(count, Style::default().fg(theme.dim)),
+                    ]))
+                })
+                .collect();
+            (
+                format!("Playlists - {}", app.playlists.len()),
+                items,
+                "No playlists yet. Press a to create one, or mark tracks in Library and press w",
+            )
+        }
+        Some(index) => {
+            let list = app.playlists.get(index);
+            let name = list.map(|l| l.name.clone()).unwrap_or_default();
+            let tracks = list.map(|l| l.tracks.as_slice()).unwrap_or(&[]);
+            let items = tracks
+                .iter()
+                .enumerate()
+                .map(|(i, path)| {
+                    let track = app
+                        .meta(path)
+                        .cloned()
+                        .unwrap_or_else(|| crate::library::to_track(path.clone()));
+                    let playing = app.active == Active::Queue(i) && app.queue_name() == name;
+                    let missing = !path.exists();
+                    let marker = if playing {
+                        "♪ "
+                    } else if app.marked_tracks.contains(&i) {
+                        "+ "
+                    } else {
+                        "  "
+                    };
+                    let title_style = if playing {
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else if missing {
+                        Style::default().fg(theme.error)
+                    } else {
+                        Style::default().fg(theme.text)
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(marker, Style::default().fg(theme.accent)),
+                        Span::styled(track.title.clone(), title_style),
+                        Span::styled(
+                            format!("   {}", track.detail()),
+                            Style::default().fg(theme.dim),
+                        ),
+                    ]))
+                })
+                .collect();
+            let marked = if app.marked_tracks.is_empty() {
+                String::new()
+            } else {
+                format!(" - {} marked", app.marked_tracks.len())
+            };
+            (
+                format!("Playlist - {name} - {} tracks{marked}", tracks.len()),
+                items,
+                "Empty playlist. Press a to add files or folders",
+            )
+        }
+    };
+    if items.is_empty() {
+        frame.render_widget(
+            Paragraph::new(message)
+                .style(Style::default().fg(theme.dim))
+                .alignment(Alignment::Center)
+                .block(panel(theme, title)),
+            area,
+        );
+        return;
+    }
+    let state = match app.open_playlist {
+        None => &mut app.playlist_state,
+        Some(_) => &mut app.playlist_track_state,
+    };
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(panel(theme, title))
+            .highlight_style(highlight(theme)),
+        area,
+        state,
+    );
+}
+
+fn draw_queue_view(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    let Some(mut state) = app.queue_view.take() else {
+        return;
+    };
+    let width = area.width.saturating_sub(4).min(64);
+    let height = (app.up_next.len() as u16 + 4).clamp(6, area.height.saturating_sub(2).max(6));
+    if width >= 30 && height <= area.height {
+        let rect = centered(area, width, height);
+        let inner = overlay_block(
+            frame,
+            rect,
+            theme,
+            format!("Up next - {}", app.up_next.len()),
+        );
+        let [list_area, help_area] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+        if app.up_next.is_empty() {
+            frame.render_widget(
+                Paragraph::new("Nothing queued. Press Q on a track to queue it")
+                    .style(Style::default().fg(theme.dim)),
+                list_area,
+            );
+        } else {
+            let items: Vec<ListItem> = app
+                .up_next
+                .iter()
+                .map(|track| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            truncate(&track.title, list_area.width as usize / 2),
+                            Style::default().fg(theme.text),
+                        ),
+                        Span::styled(
+                            format!("   {}", track.artist_or_folder()),
+                            Style::default().fg(theme.dim),
+                        ),
+                    ]))
+                })
+                .collect();
+            frame.render_stateful_widget(
+                List::new(items).highlight_style(highlight(theme)),
+                list_area,
+                &mut state,
+            );
+        }
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "⏎ play now  x remove  X clear  esc close",
+                Style::default().fg(theme.dim),
+            )),
+            help_area,
+        );
+    }
+    app.queue_view = Some(state);
+}
+
+const HELP: &[(&str, &str)] = &[
+    ("", "Playback"),
+    ("space", "pause or resume"),
+    ("n / p", "next / previous"),
+    ("left / right", "seek 5 seconds (local files)"),
+    ("+ / -", "volume"),
+    ("m", "mute"),
+    ("s", "shuffle"),
+    ("R", "repeat off, all or one"),
+    ("Q", "queue the selected or marked tracks to play next"),
+    ("Z", "show the queue"),
+    ("", "Navigation"),
+    ("1 2 3 4, tab", "Library, Playlists, Radio, Spotify"),
+    ("up / down, j / k", "select"),
+    ("enter", "play"),
+    ("g / G", "first / last"),
+    ("esc", "cancel, clear the filter or go back"),
+    ("", "Library"),
+    ("/", "filter by title, artist or album"),
+    ("S", "sort by path, title, artist or album"),
+    ("a / A", "mark a track / mark all"),
+    ("w", "save the marked tracks to a playlist"),
+    ("o", "choose a music folder"),
+    ("", "Playlists"),
+    ("a", "new playlist / add files to an open playlist"),
+    ("e", "open the selected playlist"),
+    ("d / D", "mark a track / mark all (open playlist)"),
+    ("x", "delete the playlist, or remove the marked tracks"),
+    ("i / E", "import / export an .m3u file"),
+    ("", "Radio"),
+    ("/", "find stations"),
+    ("x", "remove the selected station"),
+    ("", "Other"),
+    ("v", "next visualizer"),
+    ("c", "show or hide the clock"),
+    ("z", "sleep timer: 15, 30, 60 and 90 minutes"),
+    ("y", "equalizer preset"),
+    ("L", "lyrics of the current track"),
+    ("t", "theme picker"),
+    ("r", "reload the configuration"),
+    ("?", "this help"),
+    ("q", "quit"),
+];
+
+fn draw_help(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    let Some(offset) = app.help else {
+        return;
+    };
+    let width = area.width.saturating_sub(4).min(76);
+    let height = area.height.saturating_sub(2).min(HELP.len() as u16 + 3);
+    if width < 40 || height < 8 {
+        return;
+    }
+    let rect = centered(area, width, height);
+    let inner = overlay_block(frame, rect, theme, "Keys".to_string());
+    let [list_area, help_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    let visible = list_area.height as usize;
+    let offset = offset.min(HELP.len().saturating_sub(visible));
+    app.help = Some(offset);
+    let lines: Vec<Line> = HELP
+        .iter()
+        .skip(offset)
+        .take(visible)
+        .map(|(key, text)| {
+            if key.is_empty() {
+                Line::styled(
+                    text.to_string(),
+                    Style::default()
+                        .fg(theme.secondary)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {key:<18}"),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(text.to_string(), Style::default().fg(theme.text)),
+                ])
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), list_area);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "up/down scroll  esc close",
+            Style::default().fg(theme.dim),
+        )),
+        help_area,
+    );
+}
+
+fn draw_lyrics(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    let Some(offset) = app.lyrics_view else {
+        return;
+    };
+    let width = area.width.saturating_sub(4).min(80);
+    let height = area.height.saturating_sub(2);
+    if width < 30 || height < 6 {
+        return;
+    }
+    let Some(lyrics) = app.lyrics.clone() else {
+        return;
+    };
+    let rect = centered(area, width, height);
+    let title = format!("Lyrics · {}", app.title);
+    let inner = overlay_block(frame, rect, theme, title);
+    let [list_area, help_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    let visible = list_area.height as usize;
+    let total = lyrics.lines.len();
+    let current = lyrics.current(app.position());
+    let start = match current {
+        Some(index) => index
+            .saturating_sub(visible / 2)
+            .min(total.saturating_sub(visible)),
+        None => {
+            let start = offset.min(total.saturating_sub(visible));
+            app.lyrics_view = Some(start);
+            start
+        }
+    };
+    let lines: Vec<Line> = lyrics
+        .lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(index, (_, text))| {
+            let style = if Some(index) == current {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if lyrics.synced() {
+                Style::default().fg(theme.dim)
+            } else {
+                Style::default().fg(theme.text)
+            };
+            Line::styled(format!("  {text}"), style)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), list_area);
+    let hint = if lyrics.synced() {
+        "synced  esc close"
+    } else {
+        "up/down scroll  esc close"
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(hint, Style::default().fg(theme.dim))),
+        help_area,
+    );
+}
+
+fn draw_name_prompt(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let Some(prompt) = &app.name_prompt else {
+        return;
+    };
+    let width = area.width.saturating_sub(4).min(56);
+    let height = (app.playlists.len() as u16 + 6)
+        .clamp(6, 14)
+        .min(area.height);
+    if width < 24 || height < 5 {
+        return;
+    }
+    let rect = centered(area, width, height);
+    let inner = overlay_block(frame, rect, theme, prompt.title.to_string());
+    let [field_area, list_area, help_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(field_line(prompt.label, &prompt.input, true, theme)),
+        field_area,
+    );
+    let current = crate::playlist::find(&app.playlists, &prompt.input);
+    let names_only = matches!(
+        prompt.kind,
+        crate::app::PromptKind::SaveMarked | crate::app::PromptKind::NewList
+    );
+    let lines: Vec<Line> = app
+        .playlists
+        .iter()
+        .filter(|_| names_only)
+        .enumerate()
+        .map(|(i, list)| {
+            let style = if Some(i) == current {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.dim)
+            };
+            Line::styled(
+                format!(
+                    "  {} ({})",
+                    truncate(&list.name, inner.width.saturating_sub(12) as usize),
+                    list.tracks.len()
+                ),
+                style,
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), list_area);
+    let help = if !names_only || app.playlists.is_empty() {
+        "⏎ ok  esc cancel"
+    } else {
+        "⏎ ok  ↑↓ existing list  esc cancel"
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(help, Style::default().fg(theme.dim))),
+        help_area,
     );
 }
 
@@ -1033,7 +1561,7 @@ fn draw_spectrum(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
 }
 
-fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let block = panel(theme, "Now playing".to_string());
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1050,7 +1578,9 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 (live, app.title.clone())
             }
         }
-        Active::Local(_) => (app.title.clone(), app.artist.clone()),
+        Active::Local(_) | Active::Queue(_) | Active::Extra => {
+            (app.title.clone(), app.artist.clone())
+        }
         Active::None => (String::from("Nothing playing"), String::new()),
     };
     let icon = if app.loading {
@@ -1069,16 +1599,63 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
     ];
-    if !artist.is_empty() {
+    let mut detail = artist;
+    if matches!(
+        app.active,
+        Active::Local(_) | Active::Queue(_) | Active::Extra
+    ) && !app.album.is_empty()
+    {
+        if detail.is_empty() {
+            detail = app.album.clone();
+        } else {
+            detail = format!("{detail} - {}", app.album);
+        }
+    }
+    if !detail.is_empty() {
         spans.push(Span::styled(
-            format!("  -  {artist}"),
+            format!("  -  {detail}"),
             Style::default().fg(theme.dim),
         ));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), top);
+    let mut badges: Vec<String> = Vec::new();
+    if app.shuffle {
+        badges.push("shuffle".to_string());
+    }
+    if app.repeat != Repeat::Off {
+        badges.push(format!("repeat {}", app.repeat.label()));
+    }
+    if !app.up_next.is_empty() {
+        badges.push(format!("{} up next", app.up_next.len()));
+    }
+    if app.config.audio.eq_gains().iter().any(|g| g.abs() >= 0.05) {
+        badges.push(format!("eq {}", app.config.audio.eq));
+    }
+    if let Some(left) = app.sleep_left() {
+        badges.push(format!("sleep {}m", left.as_secs().div_ceil(60)));
+    }
+    let badge_text = badges.join(" · ");
+    let badge_width = if badge_text.is_empty() {
+        0
+    } else {
+        badge_text.chars().count() as u16 + 1
+    };
+    let [title_area, badge_area] =
+        Layout::horizontal([Constraint::Min(10), Constraint::Length(badge_width)]).areas(top);
+    frame.render_widget(Paragraph::new(Line::from(spans)), title_area);
+    if badge_width > 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                badge_text,
+                Style::default().fg(theme.secondary),
+            ))
+            .alignment(Alignment::Right),
+            badge_area,
+        );
+    }
 
     let [progress, volume] =
         Layout::horizontal([Constraint::Min(10), Constraint::Length(22)]).areas(bottom);
+    app.hit.progress = progress;
 
     let position = app.position();
     let (ratio, label) = match app.total() {
@@ -1148,14 +1725,51 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ("+/-", "volume"),
         ("m", "mute"),
         ("s", if app.shuffle { "shuffle on" } else { "shuffle" }),
-        ("o", "folder"),
+        ("R", "repeat"),
+        ("Q", "queue"),
         ("v", "viz"),
+        ("c", "clock"),
+        ("o", "folder"),
     ];
     if app.tab == Tab::Radio {
         keys.insert(2, ("/", "find"));
         keys.insert(3, ("x", "remove"));
     }
-    keys.extend([("t", "theme"), ("tab", "switch"), ("q", "quit")]);
+    if app.tab == Tab::Library && !app.filtering {
+        keys.insert(2, ("/", "filter"));
+        keys.insert(3, ("S", "sort"));
+        keys.insert(4, ("a", "mark"));
+        keys.insert(5, ("A", "all"));
+        keys.insert(6, ("w", "save list"));
+    }
+    if app.tab == Tab::Playlists {
+        if app.open_playlist.is_none() {
+            keys.insert(2, ("a", "new list"));
+            keys.insert(3, ("e", "open"));
+            keys.insert(4, ("x", "delete"));
+        } else {
+            keys.insert(2, ("a", "add files"));
+            keys.insert(3, ("d", "mark"));
+            keys.insert(4, ("D", "all"));
+            keys.insert(5, ("x", "remove"));
+            keys.insert(6, ("esc", "back"));
+        }
+    }
+    keys.extend([
+        ("t", "theme"),
+        ("?", "help"),
+        ("tab", "switch"),
+        ("q", "quit"),
+    ]);
+    if app.tab == Tab::Library && app.filtering {
+        keys = vec![
+            ("type", "filter"),
+            ("↑↓", "select"),
+            ("⏎", "keep"),
+            ("esc", "clear"),
+            ("^c", "quit"),
+        ];
+    }
     let item_width = |key: &str, label: &str| key.chars().count() + label.chars().count() + 3;
     let (quit_key, quit_label) = keys[keys.len() - 1];
     let mut budget = (area.width as usize).saturating_sub(1 + item_width(quit_key, quit_label));
@@ -1261,6 +1875,36 @@ mod tests {
         assert!(out.contains("Open folder"));
         assert!(out.contains("Albums"));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn art_shows_through_the_selection_bar() {
+        let themes = builtin_themes();
+        let theme = &themes[0];
+        let area = Rect::new(0, 0, 8, 3);
+        let mut buf = Buffer::empty(area);
+        for x in 0..8 {
+            buf[(x, 1)].set_bg(theme.accent);
+        }
+        buf[(3, 1)].set_char('x');
+        buf[(4, 2)].set_bg(Color::Rgb(1, 2, 3));
+        let cell = |x, y| Cell {
+            x,
+            y,
+            symbol: '█',
+            depth: 0.5,
+            rgb: None,
+        };
+        let cells = [cell(0, 0), cell(1, 1), cell(3, 1), cell(4, 2), cell(5, 1)];
+        paint_art(&mut buf, &cells, area, theme, 0.35);
+        assert_eq!(buf[(0, 0)].symbol(), "█");
+        assert_eq!(buf[(1, 1)].symbol(), "█");
+        assert_eq!(buf[(1, 1)].fg, theme.art_on_accent(0.35));
+        assert_eq!(buf[(1, 1)].bg, theme.accent);
+        assert_eq!(buf[(5, 1)].fg, theme.art_on_accent(0.35));
+        assert_eq!(buf[(3, 1)].symbol(), "x");
+        assert_eq!(buf[(4, 2)].symbol(), " ");
+        assert_ne!(buf[(0, 0)].fg, buf[(1, 1)].fg);
     }
 
     #[test]

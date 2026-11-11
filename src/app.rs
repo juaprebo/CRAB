@@ -1,12 +1,18 @@
 use crate::analyzer::Spectrum;
 use crate::art::Art;
 use crate::config::{self, Config};
+use crate::cover::{self, Cover};
 use crate::engine::{Engine, Track};
 use crate::finder::{self, Finder, FinderOutcome};
-use crate::library::{self, LocalTrack};
+use crate::library::{self, LocalTrack, Scan};
+use crate::lyrics::{self, Lyrics};
+use crate::media::{self, Media};
 use crate::picker::{Outcome, Picker};
+use crate::playlist::{self, Playlist};
 use crate::radio::{self, Station};
+use crate::scrobble::{self, Listen, Scrobbler};
 use crate::spotify::{self, SpotifyCommand, SpotifyEvent, SpotifyHandle};
+use crate::state::{self, State};
 use crate::sysvol::{self, Request, SystemVolume};
 use crate::theme::Theme;
 use crate::theme::rgb;
@@ -14,8 +20,10 @@ use crate::theme_editor::{
     Editor, EditorOutcome, Generator, GeneratorOutcome, PickerOutcome, ThemePicker,
 };
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -24,24 +32,27 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Library,
+    Playlists,
     Radio,
     Spotify,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Library, Tab::Radio, Tab::Spotify];
+    pub const ALL: [Tab; 4] = [Tab::Library, Tab::Playlists, Tab::Radio, Tab::Spotify];
 
     pub fn index(self) -> usize {
         match self {
             Tab::Library => 0,
-            Tab::Radio => 1,
-            Tab::Spotify => 2,
+            Tab::Playlists => 1,
+            Tab::Radio => 2,
+            Tab::Spotify => 3,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Library => "Library",
+            Tab::Playlists => "Playlists",
             Tab::Radio => "Radio",
             Tab::Spotify => "Spotify",
         }
@@ -52,6 +63,8 @@ impl Tab {
 pub enum Active {
     None,
     Local(usize),
+    Queue(usize),
+    Extra,
     Radio(usize),
     Spotify,
 }
@@ -75,12 +88,108 @@ pub struct SpotifyState {
     pub playing: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Repeat {
+    #[default]
+    Off,
+    All,
+    One,
+}
+
+impl Repeat {
+    pub fn next(self) -> Repeat {
+        match self {
+            Repeat::Off => Repeat::All,
+            Repeat::All => Repeat::One,
+            Repeat::One => Repeat::Off,
+        }
+    }
+
+    pub fn from_name(name: &str) -> Repeat {
+        match name {
+            "all" => Repeat::All,
+            "one" => Repeat::One,
+            _ => Repeat::Off,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Repeat::Off => "off",
+            Repeat::All => "all",
+            Repeat::One => "one",
+        }
+    }
+}
+
+#[derive(Clone)]
+enum Resume {
+    Local(PathBuf),
+    Queue(usize),
+}
+
+struct Tracking {
+    listen: Listen,
+    played: Duration,
+    last: Instant,
+    sent: bool,
+}
+
+struct Pick {
+    track: LocalTrack,
+    active: Active,
+    pop: bool,
+    resume: Option<Resume>,
+    duration: Option<Duration>,
+    epoch: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    SaveMarked,
+    NewList,
+    ImportM3u,
+    ExportM3u(usize),
+}
+
+#[derive(Default)]
+pub struct Hit {
+    pub body: Rect,
+    pub progress: Rect,
+    pub tabs: Vec<(Rect, Tab)>,
+}
+
+pub struct NamePrompt {
+    pub title: &'static str,
+    pub label: &'static str,
+    pub input: String,
+    pub paths: Vec<PathBuf>,
+    pub kind: PromptKind,
+}
+
+type CoverResult = (PathBuf, Option<Cover>, Option<PathBuf>);
+
 type RadioResult = (u64, std::result::Result<Track, String>);
 
 pub struct App {
     pub engine: Engine,
     pub spectrum: Spectrum,
     pub tracks: Vec<LocalTrack>,
+    all_tracks: Vec<LocalTrack>,
+    pub filter: String,
+    pub filtering: bool,
+    pub repeat: Repeat,
+    pub up_next: VecDeque<LocalTrack>,
+    resume: Option<Resume>,
+    pub queue_view: Option<ListState>,
+    pub help: Option<usize>,
+    pub hit: Hit,
+    last_click: Option<(Instant, usize)>,
+    sleep_at: Option<Instant>,
+    restore: Option<(PathBuf, Duration)>,
+    restore_shown: bool,
+    current_path: Option<PathBuf>,
+    saved_at: Instant,
     pub scanning: bool,
     pub stations: Vec<Station>,
     pub tab: Tab,
@@ -104,6 +213,15 @@ pub struct App {
     pub theme_editor: Option<Editor>,
     pub theme_generator: Option<Generator>,
     pub finder: Option<Finder>,
+    pub playlists: Vec<Playlist>,
+    pub playlist_state: ListState,
+    pub open_playlist: Option<usize>,
+    pub playlist_track_state: ListState,
+    pub marked: HashSet<PathBuf>,
+    pub marked_tracks: HashSet<usize>,
+    pub name_prompt: Option<NamePrompt>,
+    queue: Vec<LocalTrack>,
+    queue_name: String,
     pending_remove: Option<usize>,
     pub config: Config,
     pub themes: Vec<Theme>,
@@ -112,7 +230,22 @@ pub struct App {
     sysvol: Option<SystemVolume>,
     volume: f32,
     pub muted: bool,
-    tracks_rx: Option<Receiver<Vec<LocalTrack>>>,
+    tracks_rx: Option<Receiver<Scan>>,
+    meta: HashMap<PathBuf, LocalTrack>,
+    pub cover: Option<Cover>,
+    cover_tx: Sender<CoverResult>,
+    cover_rx: Receiver<CoverResult>,
+    preloaded: Option<Pick>,
+    pub lyrics: Option<Lyrics>,
+    pub lyrics_view: Option<usize>,
+    scrobbler: Option<Scrobbler>,
+    tracking: Option<Tracking>,
+    preload_skip: Option<PathBuf>,
+    cover_file: Option<PathBuf>,
+    cover_serial: u64,
+    media: Option<Media>,
+    cover_for: Option<PathBuf>,
+    pub album: String,
     roots: Vec<PathBuf>,
     watcher: Option<(notify::RecommendedWatcher, Receiver<()>)>,
     rescan_at: Option<Instant>,
@@ -123,9 +256,18 @@ pub struct App {
     rng: u64,
 }
 
+fn playlist_state(playlists: &[Playlist]) -> ListState {
+    let mut state = ListState::default();
+    if !playlists.is_empty() {
+        state.select(Some(0));
+    }
+    state
+}
+
 impl App {
     pub fn new(mut engine: Engine, roots: Vec<PathBuf>) -> Self {
         let (config, warning) = Config::load();
+        engine.eq.set(&config.audio.eq_gains());
         let themes = config.build_themes();
         let theme_index = themes
             .iter()
@@ -133,12 +275,18 @@ impl App {
             .unwrap_or(0);
         let art = config.load_art();
         let sysvol = sysvol::start();
+        let saved = state::load();
         let (volume, muted) = match &sysvol {
             Some(sys) => {
                 engine.set_volume(1.0);
                 (sys.initial.volume, sys.initial.muted)
             }
-            None => (engine.volume(), false),
+            None => {
+                if let Some(volume) = saved.volume {
+                    engine.set_volume(volume);
+                }
+                (engine.volume(), false)
+            }
         };
         let (radio_tx, radio_rx) = channel();
         let stations = radio::load_stations();
@@ -154,15 +302,40 @@ impl App {
         } else {
             (None, SpotifyStatus::LoggedOut)
         };
+        let playlists = playlist::load();
+        let playlists_paths: Vec<PathBuf> = playlists
+            .iter()
+            .flat_map(|p| p.tracks.iter().cloned())
+            .collect();
+        let sort = config.library.sort;
+        let (cover_tx, cover_rx) = channel();
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x9E3779B97F4A7C15)
             | 1;
-        Self {
+        let mut app = Self {
             engine,
             spectrum: Spectrum::new(),
             tracks: Vec::new(),
+            all_tracks: Vec::new(),
+            filter: String::new(),
+            filtering: false,
+            repeat: Repeat::from_name(&saved.repeat),
+            up_next: VecDeque::new(),
+            resume: None,
+            queue_view: None,
+            help: None,
+            hit: Hit::default(),
+            last_click: None,
+            sleep_at: None,
+            restore: saved
+                .track
+                .clone()
+                .map(|p| (p, Duration::from_secs(saved.position_secs))),
+            restore_shown: false,
+            current_path: None,
+            saved_at: Instant::now(),
             scanning: true,
             stations,
             tab: Tab::Library,
@@ -177,7 +350,7 @@ impl App {
             status: warning.clone().unwrap_or_default(),
             status_is_error: warning.is_some(),
             status_at: Instant::now(),
-            shuffle: false,
+            shuffle: saved.shuffle,
             spotify: spotify_handle,
             sp: SpotifyState {
                 status: spotify_status,
@@ -195,6 +368,15 @@ impl App {
             theme_editor: None,
             theme_generator: None,
             finder: None,
+            playlist_state: playlist_state(&playlists),
+            playlists,
+            open_playlist: None,
+            playlist_track_state: ListState::default(),
+            marked: HashSet::new(),
+            marked_tracks: HashSet::new(),
+            name_prompt: None,
+            queue: Vec::new(),
+            queue_name: String::new(),
             pending_remove: None,
             config,
             themes,
@@ -203,7 +385,22 @@ impl App {
             sysvol,
             volume,
             muted,
-            tracks_rx: Some(library::scan(roots.clone())),
+            tracks_rx: Some(library::scan(roots.clone(), playlists_paths, sort)),
+            meta: HashMap::new(),
+            cover: None,
+            cover_tx,
+            cover_rx,
+            cover_for: None,
+            preloaded: None,
+            lyrics: None,
+            lyrics_view: None,
+            scrobbler: None,
+            tracking: None,
+            preload_skip: None,
+            cover_file: None,
+            cover_serial: 0,
+            media: Media::start(),
+            album: String::new(),
             watcher: library::watch(&roots),
             roots,
             rescan_at: None,
@@ -212,7 +409,13 @@ impl App {
             generation: 0,
             radio_started: Instant::now(),
             rng: seed,
-        }
+        };
+        app.start_scrobbler();
+        app
+    }
+
+    pub fn queue_name(&self) -> &str {
+        &self.queue_name
     }
 
     fn set_status(&mut self, message: impl Into<String>, is_error: bool) {
@@ -465,6 +668,8 @@ impl App {
             .unwrap_or(0);
         self.art = config.load_art();
         self.config = config;
+        self.apply_eq();
+        self.start_scrobbler();
         match warning {
             Some(message) => self.set_status(message, true),
             None => self.set_status("Config reloaded", false),
@@ -510,36 +715,114 @@ impl App {
     pub fn total(&self) -> Option<Duration> {
         match self.active {
             Active::Spotify => Some(Duration::from_millis(self.sp.duration_ms as u64)),
-            Active::Local(_) => self.duration,
+            Active::Local(_) | Active::Queue(_) | Active::Extra => self.duration,
             _ => None,
         }
     }
 
-    fn apply_tracks(&mut self, tracks: Vec<LocalTrack>) {
-        let keep_path = self
+    fn start_scan(&mut self) {
+        let extra: Vec<PathBuf> = self
+            .playlists
+            .iter()
+            .flat_map(|p| p.tracks.iter().cloned())
+            .collect();
+        self.tracks_rx = Some(library::scan(
+            self.roots.clone(),
+            extra,
+            self.config.library.sort,
+        ));
+    }
+
+    pub fn meta(&self, path: &PathBuf) -> Option<&LocalTrack> {
+        self.meta.get(path)
+    }
+
+    fn resolve_track(&mut self, path: &PathBuf) -> LocalTrack {
+        if let Some(track) = self.meta.get(path) {
+            return track.clone();
+        }
+        let track = library::read_track(path.clone());
+        self.meta.insert(path.clone(), track.clone());
+        track
+    }
+
+    fn apply_tracks(&mut self, scan: Scan) {
+        self.meta = scan
+            .tracks
+            .iter()
+            .chain(scan.extra.iter())
+            .map(|t| (t.path.clone(), t.clone()))
+            .collect();
+        if let Active::Local(i) = self.active {
+            let now = self.tracks.get(i).map(|t| t.path.clone());
+            let still_there = now
+                .as_ref()
+                .is_some_and(|p| scan.tracks.iter().any(|t| &t.path == p));
+            if !still_there {
+                self.engine.stop();
+                self.active = Active::None;
+            }
+        }
+        self.all_tracks = scan.tracks;
+        self.rebuild_view();
+        if !self.restore_shown
+            && self.active == Active::None
+            && let Some((path, _)) = &self.restore
+        {
+            self.restore_shown = true;
+            if let Some(index) = self.tracks.iter().position(|t| &t.path == path) {
+                self.library_state.select(Some(index));
+            }
+        }
+    }
+
+    fn matches_filter(track: &LocalTrack, words: &[String]) -> bool {
+        let hay = format!(
+            "{} {} {} {}",
+            track.title, track.artist, track.album, track.folder
+        )
+        .to_lowercase();
+        words.iter().all(|w| hay.contains(w.as_str()))
+    }
+
+    fn rebuild_view(&mut self) {
+        let keep = self
             .library_state
             .selected()
             .and_then(|i| self.tracks.get(i))
             .map(|t| t.path.clone());
-        let now_path = match self.active {
+        let now = match self.active {
             Active::Local(i) => self.tracks.get(i).map(|t| t.path.clone()),
             _ => None,
         };
-        self.tracks = tracks;
+        let words: Vec<String> = self
+            .filter
+            .split_whitespace()
+            .map(|w| w.to_lowercase())
+            .collect();
+        self.tracks = if words.is_empty() {
+            self.all_tracks.clone()
+        } else {
+            self.all_tracks
+                .iter()
+                .filter(|t| Self::matches_filter(t, &words))
+                .cloned()
+                .collect()
+        };
         let find = |path: &Option<PathBuf>, tracks: &[LocalTrack]| {
             path.as_ref()
                 .and_then(|p| tracks.iter().position(|t| &t.path == p))
         };
-        if now_path.is_some() {
-            match find(&now_path, &self.tracks) {
+        if now.is_some() {
+            match find(&now, &self.tracks) {
                 Some(index) => self.active = Active::Local(index),
                 None => {
-                    self.engine.stop();
-                    self.active = Active::None;
+                    self.active = Active::Extra;
+                    self.resume = None;
                 }
             }
         }
-        let selection = find(&keep_path, &self.tracks).or(if self.tracks.is_empty() {
+        let selection = find(&keep, &self.tracks).or(if self.tracks.is_empty() {
             None
         } else {
             Some(0)
@@ -553,6 +836,10 @@ impl App {
 
     pub fn tick(&mut self, bars: usize) {
         self.expire_status();
+        self.check_sleep();
+        self.autosave();
+        self.drive_transitions();
+        self.track_listen();
         if let Some(finder) = self.finder.as_mut() {
             finder.poll();
         }
@@ -570,13 +857,26 @@ impl App {
             && Instant::now() >= at
         {
             self.rescan_at = None;
-            self.tracks_rx = Some(library::scan(self.roots.clone()));
+            self.start_scan();
         }
 
+        while let Ok((path, cover, file)) = self.cover_rx.try_recv() {
+            if self.cover_for.as_ref() == Some(&path) {
+                self.cover = cover;
+                if let Some(old) = self.cover_file.take() {
+                    let _ = std::fs::remove_file(old);
+                }
+                self.cover_file = file;
+            } else if let Some(file) = file {
+                let _ = std::fs::remove_file(file);
+            }
+        }
+        self.sync_media();
+
         if let Some(rx) = &self.tracks_rx
-            && let Ok(tracks) = rx.try_recv()
+            && let Ok(scan) = rx.try_recv()
         {
-            self.apply_tracks(tracks);
+            self.apply_tracks(scan);
             self.scanning = false;
             self.tracks_rx = None;
         }
@@ -611,7 +911,21 @@ impl App {
 
         if !self.loading {
             match self.active {
-                Active::Local(index) if self.engine.is_finished() => self.advance_local(index),
+                Active::Local(index) if self.engine.is_finished() => {
+                    if !self.start_queued() {
+                        self.advance_local(index);
+                    }
+                }
+                Active::Queue(index) if self.engine.is_finished() => {
+                    if !self.start_queued() {
+                        self.advance_queue(index);
+                    }
+                }
+                Active::Extra if self.engine.is_finished() => {
+                    if !self.start_queued() {
+                        self.resume_after();
+                    }
+                }
                 Active::Radio(index) if self.engine.is_finished() => {
                     if self.radio_started.elapsed() > Duration::from_secs(5) {
                         self.set_status("Stream interrupted, reconnecting", true);
@@ -695,28 +1009,345 @@ impl App {
         }
     }
 
-    pub fn play_local(&mut self, index: usize) {
-        let Some(track) = self.tracks.get(index).cloned() else {
-            return;
-        };
+    fn open_track(&mut self, track: &LocalTrack, active: Active) -> bool {
         self.pause_spotify();
         self.generation += 1;
         self.loading = false;
-        match Engine::open_file(&track.path, self.engine.tap()) {
+        self.preloaded = None;
+        let gain = self.gain_for(track);
+        match Engine::open_file(&track.path, self.engine.tap(), self.engine.eq.clone(), gain) {
             Ok(source) => {
                 self.duration = self.engine.play(source);
-                self.active = Active::Local(index);
-                self.title = track.title;
-                self.artist = track.folder;
-                self.library_state.select(Some(index));
+                self.active = active;
+                self.title = track.title.clone();
+                self.artist = track.artist_or_folder();
+                self.album = track.album.clone();
+                self.current_path = Some(track.path.clone());
+                if let Some((path, position)) = self.restore.take()
+                    && path == track.path
+                    && position > Duration::from_secs(2)
+                {
+                    self.engine.seek_by(true, position, self.duration);
+                }
+                self.load_cover(&track.path);
                 self.set_status("", false);
+                true
             }
             Err(error) => {
                 self.engine.stop();
                 self.active = Active::None;
                 self.set_status(format!("{error:#}"), true);
+                false
             }
         }
+    }
+
+    fn start_scrobbler(&mut self) {
+        let token = std::env::var("CRAB_LISTENBRAINZ_TOKEN")
+            .unwrap_or_else(|_| self.config.scrobble.listenbrainz_token.clone());
+        self.scrobbler = Scrobbler::start(&token);
+    }
+
+    fn begin_listen(&mut self) {
+        self.tracking = None;
+        let Some(scrobbler) = &self.scrobbler else {
+            return;
+        };
+        if self.artist.is_empty() || self.title.is_empty() {
+            return;
+        }
+        let listen = Listen {
+            title: self.title.clone(),
+            artist: self.artist.clone(),
+            album: self.album.clone(),
+            started: scrobble::now_secs(),
+            duration: self.duration,
+        };
+        scrobbler.now_playing(listen.clone());
+        self.tracking = Some(Tracking {
+            listen,
+            played: Duration::ZERO,
+            last: Instant::now(),
+            sent: false,
+        });
+    }
+
+    fn track_listen(&mut self) {
+        let playing = self.is_playing()
+            && matches!(
+                self.active,
+                Active::Local(_) | Active::Queue(_) | Active::Extra
+            );
+        let Some(tracking) = self.tracking.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        if playing {
+            tracking.played += now - tracking.last;
+        }
+        tracking.last = now;
+        if !tracking.sent && scrobble::eligible(tracking.listen.duration, tracking.played) {
+            tracking.sent = true;
+            if let Some(scrobbler) = &self.scrobbler {
+                scrobbler.listened(tracking.listen.clone());
+            }
+        }
+    }
+
+    fn gain_for(&self, track: &LocalTrack) -> f32 {
+        if self.config.audio.replaygain {
+            crate::eq::gain_factor(track.gain_db)
+        } else {
+            1.0
+        }
+    }
+
+    fn apply_eq(&self) {
+        self.engine.eq.set(&self.config.audio.eq_gains());
+    }
+
+    fn cycle_eq(&mut self) {
+        let name = crate::eq::next_preset(&self.config.audio.eq);
+        self.config.audio.eq = name.to_string();
+        self.config.audio.eq_bands = None;
+        self.apply_eq();
+        match config::pick_eq(name) {
+            Ok(()) => self.set_status(format!("Equalizer: {name}"), false),
+            Err(error) => {
+                self.set_status(format!("Equalizer: {name} (not saved: {error:#})"), true)
+            }
+        }
+    }
+
+    fn peek_next(&mut self) -> Option<(LocalTrack, Active, bool, Option<Resume>)> {
+        let resume = match self.active {
+            Active::Local(i) => self.tracks.get(i).map(|t| Resume::Local(t.path.clone())),
+            Active::Queue(i) => Some(Resume::Queue(i)),
+            _ => return None,
+        };
+        if let Some(track) = self.up_next.front().cloned() {
+            return Some((track, Active::Extra, true, resume));
+        }
+        let (len, current, local) = match self.active {
+            Active::Local(i) => (self.tracks.len(), i, true),
+            Active::Queue(i) => (self.queue.len(), i, false),
+            _ => return None,
+        };
+        if len == 0 {
+            return None;
+        }
+        let index = if self.repeat == Repeat::One {
+            current
+        } else if self.shuffle {
+            (self.next_random() % len as u64) as usize
+        } else if current + 1 < len {
+            current + 1
+        } else if self.repeat == Repeat::All {
+            0
+        } else {
+            return None;
+        };
+        if local {
+            let track = self.tracks.get(index)?.clone();
+            Some((track, Active::Local(index), false, None))
+        } else {
+            let track = self.queue.get(index)?.clone();
+            Some((track, Active::Queue(index), false, None))
+        }
+    }
+
+    fn commit_pick(&mut self, pick: Pick) {
+        if pick.pop {
+            if self
+                .up_next
+                .front()
+                .is_some_and(|t| t.path == pick.track.path)
+            {
+                self.up_next.pop_front();
+            }
+            self.resume = pick.resume;
+        }
+        let track = pick.track;
+        self.active = pick.active;
+        self.duration = pick.duration;
+        self.title = track.title.clone();
+        self.artist = track.artist_or_folder();
+        self.album = track.album.clone();
+        self.current_path = Some(track.path.clone());
+        self.load_cover(&track.path);
+        match pick.active {
+            Active::Local(index) => self.library_state.select(Some(index)),
+            Active::Queue(index) => {
+                if let Some(open) = self.open_playlist
+                    && self
+                        .playlists
+                        .get(open)
+                        .is_some_and(|p| p.name == self.queue_name)
+                {
+                    self.playlist_track_state.select(Some(index));
+                }
+            }
+            _ => {}
+        }
+        self.set_status("", false);
+    }
+
+    fn drive_transitions(&mut self) {
+        self.engine.update();
+        if let Some(epoch) = self.preloaded.as_ref().map(|p| p.epoch) {
+            if epoch != self.engine.epoch() || self.engine.is_finished() {
+                self.preloaded = None;
+            } else if self.engine.sources() <= 1
+                && let Some(pick) = self.preloaded.take()
+            {
+                self.commit_pick(pick);
+            }
+            return;
+        }
+        if self.loading || !matches!(self.active, Active::Local(_) | Active::Queue(_)) {
+            return;
+        }
+        let Some(total) = self.duration else {
+            return;
+        };
+        if self.engine.is_paused() || self.preload_skip == self.current_path {
+            return;
+        }
+        let remaining = total.saturating_sub(self.engine.position());
+        let fade = self.config.audio.fade();
+        let crossfade = !fade.is_zero() && total > fade * 3;
+        let window = if crossfade {
+            fade
+        } else if self.config.audio.gapless {
+            Duration::from_secs(8)
+        } else {
+            return;
+        };
+        if remaining > window {
+            return;
+        }
+        let Some((track, active, pop, resume)) = self.peek_next() else {
+            self.preload_skip = self.current_path.clone();
+            return;
+        };
+        let gain = self.gain_for(&track);
+        let source =
+            match Engine::open_file(&track.path, self.engine.tap(), self.engine.eq.clone(), gain) {
+                Ok(source) => source,
+                Err(_) => {
+                    self.preload_skip = self.current_path.clone();
+                    return;
+                }
+            };
+        if crossfade {
+            let duration = self.engine.crossfade_to(source, fade);
+            self.commit_pick(Pick {
+                track,
+                active,
+                pop,
+                resume,
+                duration,
+                epoch: self.engine.epoch(),
+            });
+        } else {
+            let duration = self.engine.queue_next(source);
+            self.preloaded = Some(Pick {
+                track,
+                active,
+                pop,
+                resume,
+                duration,
+                epoch: self.engine.epoch(),
+            });
+        }
+    }
+
+    fn load_cover(&mut self, path: &std::path::Path) {
+        self.lyrics = lyrics::load(path);
+        if self.lyrics.is_none() {
+            self.lyrics_view = None;
+        }
+        self.begin_listen();
+        self.cover = None;
+        self.cover_for = Some(path.to_path_buf());
+        self.cover_serial += 1;
+        let serial = self.cover_serial;
+        let path = path.to_path_buf();
+        let tx = self.cover_tx.clone();
+        std::thread::spawn(move || {
+            let bytes = library::read_cover(&path);
+            let cover = bytes.as_deref().and_then(cover::decode);
+            let file = bytes.and_then(|bytes| {
+                let dir = dirs::cache_dir()?.join("crab");
+                std::fs::create_dir_all(&dir).ok()?;
+                let target = dir.join(format!("cover-{}-{serial}", std::process::id()));
+                std::fs::write(&target, bytes).ok()?;
+                Some(target)
+            });
+            let _ = tx.send((path, cover, file));
+        });
+    }
+
+    pub fn play_local(&mut self, index: usize) {
+        let Some(track) = self.tracks.get(index).cloned() else {
+            return;
+        };
+        if self.open_track(&track, Active::Local(index)) {
+            self.library_state.select(Some(index));
+        }
+    }
+
+    fn play_queue(&mut self, index: usize) -> bool {
+        let Some(track) = self.queue.get(index).cloned() else {
+            return false;
+        };
+        if !self.open_track(&track, Active::Queue(index)) {
+            return false;
+        }
+        if let Some(open) = self.open_playlist
+            && self
+                .playlists
+                .get(open)
+                .is_some_and(|p| p.name == self.queue_name)
+        {
+            self.playlist_track_state.select(Some(index));
+        }
+        true
+    }
+
+    fn play_playlist(&mut self, list: usize, index: usize) {
+        let Some(playlist) = self.playlists.get(list) else {
+            return;
+        };
+        let name = playlist.name.clone();
+        let paths = playlist.tracks.clone();
+        self.queue = paths.iter().map(|p| self.resolve_track(p)).collect();
+        self.queue_name = name;
+        self.play_queue(index);
+    }
+
+    fn advance_queue(&mut self, current: usize) {
+        let len = self.queue.len();
+        if self.repeat == Repeat::One && current < len && self.play_queue(current) {
+            return;
+        }
+        let mut index = current;
+        for _ in 0..len {
+            if self.shuffle {
+                index = (self.next_random() % len as u64) as usize;
+            } else if index + 1 < len {
+                index += 1;
+            } else if self.repeat == Repeat::All {
+                index = 0;
+            } else {
+                break;
+            }
+            if self.play_queue(index) {
+                return;
+            }
+        }
+        self.engine.stop();
+        self.active = Active::None;
     }
 
     pub fn play_radio(&mut self, index: usize) {
@@ -738,24 +1369,32 @@ impl App {
 
         let title = self.radio_title.clone();
         let tap = self.engine.tap();
+        let eq = self.engine.eq.clone();
         let tx = self.radio_tx.clone();
         std::thread::spawn(move || {
             let result = (|| -> Result<Track> {
                 let connection = radio::connect(&station.url, title)?;
-                Engine::open_stream(connection.stream, &connection.mime, tap)
+                Engine::open_stream(connection.stream, &connection.mime, tap, eq)
             })();
             let _ = tx.send((generation, result.map_err(|e| format!("{e:#}"))));
         });
     }
 
     fn advance_local(&mut self, current: usize) {
-        if self.tracks.is_empty() {
+        let len = self.tracks.len();
+        if len == 0 {
+            return;
+        }
+        if self.repeat == Repeat::One && current < len {
+            self.play_local(current);
             return;
         }
         let next = if self.shuffle {
-            Some((self.next_random() % self.tracks.len() as u64) as usize)
-        } else if current + 1 < self.tracks.len() {
+            Some((self.next_random() % len as u64) as usize)
+        } else if current + 1 < len {
             Some(current + 1)
+        } else if self.repeat == Repeat::All {
+            Some(0)
         } else {
             None
         };
@@ -768,7 +1407,49 @@ impl App {
         }
     }
 
+    fn start_queued(&mut self) -> bool {
+        if self.up_next.is_empty() {
+            return false;
+        }
+        let resume = match self.active {
+            Active::Local(i) => self.tracks.get(i).map(|t| Resume::Local(t.path.clone())),
+            Active::Queue(i) => Some(Resume::Queue(i)),
+            Active::Extra => self.resume.take(),
+            _ => None,
+        };
+        while let Some(track) = self.up_next.pop_front() {
+            if self.open_track(&track, Active::Extra) {
+                self.resume = resume;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn resume_after(&mut self) {
+        match self.resume.take() {
+            Some(Resume::Local(path)) => match self.tracks.iter().position(|t| t.path == path) {
+                Some(index) => self.advance_local(index),
+                None => {
+                    self.engine.stop();
+                    self.active = Active::None;
+                }
+            },
+            Some(Resume::Queue(index)) => self.advance_queue(index),
+            None => {
+                self.engine.stop();
+                self.active = Active::None;
+            }
+        }
+    }
+
     fn step(&mut self, forward: bool) {
+        if forward
+            && matches!(self.active, Active::Local(_) | Active::Queue(_))
+            && self.start_queued()
+        {
+            return;
+        }
         match self.active {
             Active::Spotify => {
                 if let Some(handle) = &self.spotify {
@@ -777,6 +1458,15 @@ impl App {
                     } else {
                         SpotifyCommand::Previous
                     });
+                }
+            }
+            Active::Extra => {
+                if forward {
+                    if !self.start_queued() {
+                        self.resume_after();
+                    }
+                } else {
+                    self.engine.seek_by(false, Duration::from_secs(3600), None);
                 }
             }
             Active::Local(current) => {
@@ -792,6 +1482,20 @@ impl App {
                     (current + len - 1) % len
                 };
                 self.play_local(index);
+            }
+            Active::Queue(current) => {
+                let len = self.queue.len();
+                if len == 0 {
+                    return;
+                }
+                let index = if self.shuffle {
+                    (self.next_random() % len as u64) as usize
+                } else if forward {
+                    (current + 1) % len
+                } else {
+                    (current + len - 1) % len
+                };
+                self.play_queue(index);
             }
             Active::Radio(current) => {
                 let len = self.stations.len();
@@ -816,6 +1520,24 @@ impl App {
                     self.play_local(index);
                 }
             }
+            Tab::Playlists => match self.open_playlist {
+                None => {
+                    if let Some(index) = self.playlist_state.selected()
+                        && let Some(list) = self.playlists.get(index)
+                    {
+                        if list.tracks.is_empty() {
+                            self.set_status("This playlist is empty, press e to open it", true);
+                        } else {
+                            self.play_playlist(index, 0);
+                        }
+                    }
+                }
+                Some(list) => {
+                    if let Some(index) = self.playlist_track_state.selected() {
+                        self.play_playlist(list, index);
+                    }
+                }
+            },
             Tab::Radio => {
                 if let Some(index) = self.radio_state.selected() {
                     self.play_radio(index);
@@ -836,7 +1558,7 @@ impl App {
                     handle.send(SpotifyCommand::PlayPause);
                 }
             }
-            Active::Local(_) | Active::Radio(_) => {
+            Active::Local(_) | Active::Queue(_) | Active::Extra | Active::Radio(_) => {
                 if !self.loading {
                     self.engine.toggle_pause();
                 }
@@ -845,9 +1567,25 @@ impl App {
         }
     }
 
+    fn library_len(&self) -> usize {
+        match (self.tab, self.open_playlist) {
+            (Tab::Playlists, None) => self.playlists.len(),
+            (Tab::Playlists, Some(list)) => self.playlists.get(list).map_or(0, |p| p.tracks.len()),
+            _ => self.tracks.len(),
+        }
+    }
+
+    fn library_state_mut(&mut self) -> &mut ListState {
+        match (self.tab, self.open_playlist) {
+            (Tab::Playlists, None) => &mut self.playlist_state,
+            (Tab::Playlists, Some(_)) => &mut self.playlist_track_state,
+            _ => &mut self.library_state,
+        }
+    }
+
     fn list_len(&self) -> usize {
         match self.tab {
-            Tab::Library => self.tracks.len(),
+            Tab::Library | Tab::Playlists => self.library_len(),
             Tab::Radio => self.stations.len(),
             Tab::Spotify => 0,
         }
@@ -859,7 +1597,7 @@ impl App {
             return;
         }
         let state = match self.tab {
-            Tab::Library => &mut self.library_state,
+            Tab::Library | Tab::Playlists => self.library_state_mut(),
             Tab::Radio => &mut self.radio_state,
             Tab::Spotify => return,
         };
@@ -875,7 +1613,7 @@ impl App {
         }
         let target = if last { len - 1 } else { 0 };
         match self.tab {
-            Tab::Library => self.library_state.select(Some(target)),
+            Tab::Library | Tab::Playlists => self.library_state_mut().select(Some(target)),
             Tab::Radio => self.radio_state.select(Some(target)),
             Tab::Spotify => {}
         }
@@ -926,6 +1664,7 @@ impl App {
         };
         match picker.handle_key(key) {
             Outcome::Stay => {}
+            Outcome::Collect(paths) => self.collect_into_playlist(paths),
             Outcome::Cancel => self.picker = None,
             Outcome::Replace(path) => {
                 self.picker = None;
@@ -949,11 +1688,12 @@ impl App {
                 self.active = Active::None;
             }
             self.tracks.clear();
+            self.all_tracks.clear();
             self.library_state.select(None);
         }
         self.roots = roots;
         self.watcher = library::watch(&self.roots);
-        self.tracks_rx = Some(library::scan(self.roots.clone()));
+        self.start_scan();
         self.rescan_at = None;
         self.scanning = true;
         self.tab = Tab::Library;
@@ -969,6 +1709,26 @@ impl App {
         }
         if key.code != KeyCode::Char('x') {
             self.pending_remove = None;
+        }
+        if self.help.is_some() {
+            self.help_key(key);
+            return;
+        }
+        if self.lyrics_view.is_some() {
+            self.lyrics_key(key);
+            return;
+        }
+        if self.queue_view.is_some() {
+            self.queue_view_key(key);
+            return;
+        }
+        if self.name_prompt.is_some() {
+            self.name_prompt_key(key);
+            return;
+        }
+        if self.filtering {
+            self.filter_key(key);
+            return;
         }
         if self.finder.is_some() {
             self.finder_key(key);
@@ -992,16 +1752,51 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Esc => self.cancel_loading(),
+            KeyCode::Esc => {
+                if !self.cancel_loading() && !self.clear_filter() {
+                    self.close_playlist();
+                }
+            }
+            KeyCode::Char('/') if self.tab == Tab::Library => self.filtering = true,
+            KeyCode::Char('R') => {
+                self.repeat = self.repeat.next();
+                self.set_status(format!("Repeat {}", self.repeat.label()), false);
+            }
+            KeyCode::Char('Q') => self.queue_add(),
+            KeyCode::Char('Z') => {
+                let mut state = ListState::default();
+                if !self.up_next.is_empty() {
+                    state.select(Some(0));
+                }
+                self.queue_view = Some(state);
+            }
+            KeyCode::Char('?') => self.help = Some(0),
+            KeyCode::Backspace => self.close_playlist(),
+            KeyCode::Char('a') if self.in_folders() => self.toggle_mark(),
+            KeyCode::Char('A') if self.in_folders() => self.toggle_mark_all(),
+            KeyCode::Char('S') if self.in_folders() => self.next_sort(),
+            KeyCode::Char('d') if self.in_open_playlist() => self.toggle_track_mark(),
+            KeyCode::Char('D') if self.in_open_playlist() => self.toggle_track_mark_all(),
+            KeyCode::Char('w') if self.in_folders() => self.save_marked(),
+            KeyCode::Char('a') if self.in_playlists() => self.add_to_playlist(),
+            KeyCode::Char('x') if self.in_playlists() => self.remove_from_playlists(),
+            KeyCode::Char('e') if self.in_playlists() => self.open_selected_playlist(),
+            KeyCode::Char('i') if self.in_playlists() => self.open_import_prompt(),
+            KeyCode::Char('E') if self.in_playlists() => self.open_export_prompt(),
+            KeyCode::Char('z') => self.cycle_sleep(),
+            KeyCode::Char('y') => self.cycle_eq(),
+            KeyCode::Char('L') => self.toggle_lyrics(),
             KeyCode::Char('v') => self.next_visualizer(),
+            KeyCode::Char('c') => self.toggle_clock(),
             KeyCode::Char('o') => self.open_picker(),
             KeyCode::Char('/') if self.tab == Tab::Radio => self.open_finder(),
             KeyCode::Char('x') if self.tab == Tab::Radio => self.remove_station(),
             KeyCode::Tab => self.switch_tab(true),
             KeyCode::BackTab => self.switch_tab(false),
             KeyCode::Char('1') => self.tab = Tab::Library,
-            KeyCode::Char('2') => self.tab = Tab::Radio,
-            KeyCode::Char('3') => self.tab = Tab::Spotify,
+            KeyCode::Char('2') => self.tab = Tab::Playlists,
+            KeyCode::Char('3') => self.tab = Tab::Radio,
+            KeyCode::Char('4') => self.tab = Tab::Spotify,
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::PageUp => self.move_selection(-10),
@@ -1032,13 +1827,789 @@ impl App {
         }
     }
 
-    fn cancel_loading(&mut self) {
+    fn cancel_loading(&mut self) -> bool {
         if self.loading && matches!(self.active, Active::Radio(_)) {
             self.generation += 1;
             self.engine.stop();
             self.active = Active::None;
             self.loading = false;
             self.set_status("Connection cancelled", false);
+            return true;
+        }
+        false
+    }
+
+    fn in_folders(&self) -> bool {
+        self.tab == Tab::Library
+    }
+
+    fn in_playlists(&self) -> bool {
+        self.tab == Tab::Playlists
+    }
+
+    fn open_selected_playlist(&mut self) {
+        if self.open_playlist.is_some() {
+            return;
+        }
+        if let Some(index) = self.playlist_state.selected()
+            && index < self.playlists.len()
+        {
+            self.open_playlist = Some(index);
+            self.marked_tracks.clear();
+            self.playlist_track_state.select(Some(0));
+        }
+    }
+
+    pub fn sleep_left(&self) -> Option<Duration> {
+        self.sleep_at
+            .map(|at| at.saturating_duration_since(Instant::now()))
+    }
+
+    fn cycle_sleep(&mut self) {
+        let minutes = match self.sleep_left().map(|d| d.as_secs().div_ceil(60)) {
+            None => 15,
+            Some(m) if m <= 15 => 30,
+            Some(m) if m <= 30 => 60,
+            Some(m) if m <= 60 => 90,
+            Some(_) => 0,
+        };
+        if minutes == 0 {
+            self.sleep_at = None;
+            self.set_status("Sleep timer off", false);
+        } else {
+            self.sleep_at = Some(Instant::now() + Duration::from_secs(minutes * 60));
+            self.set_status(format!("Sleep timer: {minutes} minutes"), false);
+        }
+    }
+
+    fn check_sleep(&mut self) {
+        let Some(at) = self.sleep_at else {
+            return;
+        };
+        if Instant::now() < at {
+            return;
+        }
+        self.sleep_at = None;
+        self.generation += 1;
+        self.engine.stop();
+        self.loading = false;
+        self.pause_spotify();
+        self.active = Active::None;
+        self.set_status("Sleep timer: playback stopped", false);
+    }
+
+    fn overlay_open(&self) -> bool {
+        self.finder.is_some()
+            || self.theme_editor.is_some()
+            || self.theme_generator.is_some()
+            || self.theme_picker.is_some()
+            || self.picker.is_some()
+            || self.help.is_some()
+            || self.lyrics_view.is_some()
+            || self.queue_view.is_some()
+            || self.name_prompt.is_some()
+    }
+
+    fn inside(rect: Rect, x: u16, y: u16) -> bool {
+        x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+    }
+
+    pub fn on_mouse(&mut self, event: MouseEvent) {
+        if self.overlay_open() {
+            return;
+        }
+        let (x, y) = (event.column, event.row);
+        match event.kind {
+            MouseEventKind::ScrollUp => self.move_selection(-3),
+            MouseEventKind::ScrollDown => self.move_selection(3),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some((_, tab)) = self
+                    .hit
+                    .tabs
+                    .iter()
+                    .find(|(rect, _)| Self::inside(*rect, x, y))
+                {
+                    self.tab = *tab;
+                    return;
+                }
+                if Self::inside(self.hit.progress, x, y) {
+                    self.seek_to_ratio(x);
+                    return;
+                }
+                if Self::inside(self.hit.body, x, y) {
+                    self.click_row(y);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn seek_to_ratio(&mut self, x: u16) {
+        let progress = self.hit.progress;
+        if progress.width == 0 {
+            return;
+        }
+        let Some(total) = self.duration else {
+            return;
+        };
+        if !matches!(
+            self.active,
+            Active::Local(_) | Active::Queue(_) | Active::Extra
+        ) {
+            return;
+        }
+        let ratio = (x.saturating_sub(progress.x)) as f64 / progress.width as f64;
+        let target = total.mul_f64(ratio.clamp(0.0, 0.995));
+        if !self.engine.seek_to(target) {
+            self.set_status("Seeking is not supported for this file", true);
+        }
+    }
+
+    fn click_row(&mut self, y: u16) {
+        let body = self.hit.body;
+        if y <= body.y || y + 1 >= body.y + body.height {
+            return;
+        }
+        let row = (y - body.y - 1) as usize;
+        let len = self.list_len();
+        let state = match self.tab {
+            Tab::Library | Tab::Playlists => self.library_state_mut(),
+            Tab::Radio => &mut self.radio_state,
+            Tab::Spotify => return,
+        };
+        let index = state.offset() + row;
+        if index >= len {
+            return;
+        }
+        state.select(Some(index));
+        let double = self
+            .last_click
+            .is_some_and(|(at, last)| last == index && at.elapsed() < Duration::from_millis(450));
+        if double {
+            self.last_click = None;
+            self.play_selected();
+        } else {
+            self.last_click = Some((Instant::now(), index));
+        }
+    }
+
+    fn clear_filter(&mut self) -> bool {
+        if self.tab != Tab::Library || self.filter.is_empty() {
+            return false;
+        }
+        self.filter.clear();
+        self.rebuild_view();
+        true
+    }
+
+    fn filter_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.filtering = false;
+                self.filter.clear();
+                self.rebuild_view();
+            }
+            KeyCode::Enter => self.filtering = false,
+            KeyCode::Backspace => {
+                if self.filter.pop().is_none() {
+                    self.filtering = false;
+                }
+                self.rebuild_view();
+            }
+            KeyCode::Up => self.move_selection(-1),
+            KeyCode::Down => self.move_selection(1),
+            KeyCode::PageUp => self.move_selection(-10),
+            KeyCode::PageDown => self.move_selection(10),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.filter.push(c);
+                self.rebuild_view();
+            }
+            _ => {}
+        }
+    }
+
+    fn queue_add(&mut self) {
+        let mut added: Vec<LocalTrack> = Vec::new();
+        match self.tab {
+            Tab::Library => {
+                let marked: Vec<LocalTrack> = self
+                    .tracks
+                    .iter()
+                    .filter(|t| self.marked.contains(&t.path))
+                    .cloned()
+                    .collect();
+                if marked.is_empty() {
+                    if let Some(track) = self
+                        .library_state
+                        .selected()
+                        .and_then(|i| self.tracks.get(i))
+                    {
+                        added.push(track.clone());
+                    }
+                } else {
+                    added = marked;
+                    self.marked.clear();
+                }
+            }
+            Tab::Playlists => {
+                let (list, indices): (Option<usize>, Vec<usize>) = match self.open_playlist {
+                    Some(list) => {
+                        let mut picked: Vec<usize> = self.marked_tracks.iter().copied().collect();
+                        picked.sort_unstable();
+                        if picked.is_empty() {
+                            picked.extend(self.playlist_track_state.selected());
+                        } else {
+                            self.marked_tracks.clear();
+                        }
+                        (Some(list), picked)
+                    }
+                    None => {
+                        let list = self.playlist_state.selected();
+                        let count = list
+                            .and_then(|i| self.playlists.get(i))
+                            .map_or(0, |p| p.tracks.len());
+                        (list, (0..count).collect())
+                    }
+                };
+                if let Some(list) = list {
+                    let paths: Vec<PathBuf> = indices
+                        .iter()
+                        .filter_map(|&i| self.playlists.get(list)?.tracks.get(i).cloned())
+                        .collect();
+                    for path in paths {
+                        added.push(self.resolve_track(&path));
+                    }
+                }
+            }
+            _ => return,
+        }
+        if added.is_empty() {
+            return;
+        }
+        let count = added.len();
+        self.up_next.extend(added);
+        self.set_status(
+            format!("Queued {count} ({} up next)", self.up_next.len()),
+            false,
+        );
+    }
+
+    fn queue_view_key(&mut self, key: KeyEvent) {
+        let len = self.up_next.len();
+        let Some(state) = self.queue_view.as_mut() else {
+            return;
+        };
+        let current = state.selected().unwrap_or(0);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('Z') | KeyCode::Char('q') => self.queue_view = None,
+            KeyCode::Up | KeyCode::Char('k') => state.select(Some(current.saturating_sub(1))),
+            KeyCode::Down | KeyCode::Char('j') if len > 0 => {
+                state.select(Some((current + 1).min(len - 1)));
+            }
+            KeyCode::Char('x') if current < len => {
+                self.up_next.remove(current);
+                let left = self.up_next.len();
+                if let Some(state) = self.queue_view.as_mut() {
+                    state.select(if left == 0 {
+                        None
+                    } else {
+                        Some(current.min(left - 1))
+                    });
+                }
+            }
+            KeyCode::Char('X') => {
+                self.up_next.clear();
+                state.select(None);
+            }
+            KeyCode::Enter if current < len => {
+                if let Some(track) = self.up_next.remove(current) {
+                    self.up_next.push_front(track);
+                    self.queue_view = None;
+                    self.start_queued();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn toggle_lyrics(&mut self) {
+        if self.lyrics.is_some() {
+            self.lyrics_view = Some(0);
+        } else {
+            self.set_status("No lyrics for this track", false);
+        }
+    }
+
+    fn lyrics_key(&mut self, key: KeyEvent) {
+        let Some(offset) = self.lyrics_view.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('L') | KeyCode::Char('q') => self.lyrics_view = None,
+            KeyCode::Up | KeyCode::Char('k') => *offset = offset.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => *offset += 1,
+            KeyCode::PageUp => *offset = offset.saturating_sub(10),
+            KeyCode::PageDown => *offset += 10,
+            KeyCode::Home | KeyCode::Char('g') => *offset = 0,
+            _ => {}
+        }
+    }
+
+    fn help_key(&mut self, key: KeyEvent) {
+        let Some(offset) = self.help.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => self.help = None,
+            KeyCode::Up | KeyCode::Char('k') => *offset = offset.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => *offset += 1,
+            KeyCode::PageUp => *offset = offset.saturating_sub(10),
+            KeyCode::PageDown => *offset += 10,
+            KeyCode::Home | KeyCode::Char('g') => *offset = 0,
+            _ => {}
+        }
+    }
+
+    fn in_open_playlist(&self) -> bool {
+        self.tab == Tab::Playlists && self.open_playlist.is_some()
+    }
+
+    fn toggle_mark_all(&mut self) {
+        if self.tracks.is_empty() {
+            return;
+        }
+        if self.tracks.iter().all(|t| self.marked.contains(&t.path)) {
+            self.marked.clear();
+        } else {
+            self.marked = self.tracks.iter().map(|t| t.path.clone()).collect();
+        }
+    }
+
+    fn toggle_track_mark(&mut self) {
+        let Some(index) = self.playlist_track_state.selected() else {
+            return;
+        };
+        if !self.marked_tracks.remove(&index) {
+            self.marked_tracks.insert(index);
+        }
+        self.move_selection(1);
+    }
+
+    fn toggle_track_mark_all(&mut self) {
+        let len = self.library_len();
+        if len == 0 {
+            return;
+        }
+        if self.marked_tracks.len() == len {
+            self.marked_tracks.clear();
+        } else {
+            self.marked_tracks = (0..len).collect();
+        }
+    }
+
+    fn close_playlist(&mut self) {
+        if self.in_playlists() {
+            self.open_playlist = None;
+            self.marked_tracks.clear();
+        }
+    }
+
+    fn toggle_mark(&mut self) {
+        let Some(index) = self.library_state.selected() else {
+            return;
+        };
+        let Some(track) = self.tracks.get(index) else {
+            return;
+        };
+        let path = track.path.clone();
+        if !self.marked.remove(&path) {
+            self.marked.insert(path);
+        }
+        self.move_selection(1);
+    }
+
+    fn save_marked(&mut self) {
+        let mut paths: Vec<PathBuf> = self
+            .tracks
+            .iter()
+            .filter(|t| self.marked.contains(&t.path))
+            .map(|t| t.path.clone())
+            .collect();
+        if paths.is_empty()
+            && let Some(track) = self
+                .library_state
+                .selected()
+                .and_then(|i| self.tracks.get(i))
+        {
+            paths.push(track.path.clone());
+        }
+        if paths.is_empty() {
+            return;
+        }
+        self.name_prompt = Some(NamePrompt {
+            title: "Save to playlist",
+            label: "Name",
+            input: String::new(),
+            paths,
+            kind: PromptKind::SaveMarked,
+        });
+    }
+
+    fn add_to_playlist(&mut self) {
+        match self.open_playlist {
+            Some(list) => {
+                if list >= self.playlists.len() {
+                    return;
+                }
+                let start = self
+                    .roots
+                    .first()
+                    .cloned()
+                    .or_else(dirs::home_dir)
+                    .unwrap_or_else(|| PathBuf::from("/"));
+                self.picker = Some(Picker::for_files(start));
+            }
+            None => {
+                self.name_prompt = Some(NamePrompt {
+                    title: "New playlist",
+                    label: "Name",
+                    input: String::new(),
+                    paths: Vec::new(),
+                    kind: PromptKind::NewList,
+                });
+            }
+        }
+    }
+
+    fn collect_into_playlist(&mut self, paths: Vec<PathBuf>) {
+        let Some(list) = self.open_playlist else {
+            return;
+        };
+        let Some(name) = self.playlists.get(list).map(|p| p.name.clone()) else {
+            return;
+        };
+        let found: Vec<PathBuf> = paths.iter().flat_map(|p| library::collect(p)).collect();
+        if found.is_empty() {
+            if let Some(picker) = self.picker.as_mut() {
+                picker.error = Some("No audio files there".to_string());
+            }
+            return;
+        }
+        for path in &found {
+            self.resolve_track(path);
+        }
+        let (_, added) = playlist::add_tracks(&mut self.playlists, &name, found);
+        let message = match playlist::save(&self.playlists) {
+            Ok(()) => format!("Added {added} to {name}"),
+            Err(error) => format!("Added {added} to {name} but not saved: {error:#}"),
+        };
+        if let Some(picker) = self.picker.as_mut() {
+            picker.error = None;
+        }
+        self.set_status(message, false);
+        if self.playlist_track_state.selected().is_none() {
+            self.playlist_track_state.select(Some(0));
+        }
+    }
+
+    fn name_prompt_key(&mut self, key: KeyEvent) {
+        let Some(prompt) = self.name_prompt.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.name_prompt = None,
+            KeyCode::Backspace => {
+                prompt.input.pop();
+            }
+            KeyCode::Up | KeyCode::Down
+                if !self.playlists.is_empty()
+                    && matches!(prompt.kind, PromptKind::SaveMarked | PromptKind::NewList) =>
+            {
+                let current = playlist::find(&self.playlists, &prompt.input);
+                let len = self.playlists.len();
+                let next = match (current, key.code == KeyCode::Down) {
+                    (Some(i), true) => (i + 1) % len,
+                    (Some(i), false) => (i + len - 1) % len,
+                    (None, true) => 0,
+                    (None, false) => len - 1,
+                };
+                prompt.input = self.playlists[next].name.clone();
+            }
+            KeyCode::Char(c) => prompt.input.push(c),
+            KeyCode::Enter => {
+                let name = prompt.input.trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                let Some(prompt) = self.name_prompt.take() else {
+                    return;
+                };
+                self.finish_prompt(prompt, name);
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_prompt(&mut self, prompt: NamePrompt, name: String) {
+        match prompt.kind {
+            PromptKind::ImportM3u => return self.import_m3u(&name),
+            PromptKind::ExportM3u(index) => return self.export_m3u(index, &name),
+            _ => {}
+        }
+        let new_list = prompt.kind == PromptKind::NewList;
+        let (index, added) = playlist::add_tracks(&mut self.playlists, &name, prompt.paths);
+        let name = self.playlists[index].name.clone();
+        let saved = playlist::save(&self.playlists);
+        if new_list {
+            self.tab = Tab::Playlists;
+            self.playlist_state.select(Some(index));
+            self.open_playlist = Some(index);
+            self.playlist_track_state
+                .select(if self.playlists[index].tracks.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                });
+            self.add_to_playlist();
+        } else {
+            self.marked.clear();
+            self.playlist_state.select(Some(index));
+        }
+        match saved {
+            Ok(()) if new_list => self.set_status(format!("Playlist {name}"), false),
+            Ok(()) => self.set_status(format!("Added {added} to {name}"), false),
+            Err(error) => self.set_status(format!("{name} not saved: {error:#}"), true),
+        }
+    }
+
+    fn open_import_prompt(&mut self) {
+        let start = dirs::home_dir()
+            .map(|h| format!("{}/", h.display()))
+            .unwrap_or_default();
+        self.name_prompt = Some(NamePrompt {
+            title: "Import playlist (.m3u)",
+            label: "File",
+            input: start,
+            paths: Vec::new(),
+            kind: PromptKind::ImportM3u,
+        });
+    }
+
+    fn open_export_prompt(&mut self) {
+        let Some(index) = self.playlist_state.selected() else {
+            return;
+        };
+        let Some(list) = self.playlists.get(index) else {
+            return;
+        };
+        let safe: String = list
+            .name
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let dir = dirs::home_dir()
+            .map(|h| format!("{}/", h.display()))
+            .unwrap_or_default();
+        self.name_prompt = Some(NamePrompt {
+            title: "Export playlist (.m3u)",
+            label: "File",
+            input: format!("{dir}{safe}.m3u"),
+            paths: Vec::new(),
+            kind: PromptKind::ExportM3u(index),
+        });
+    }
+
+    fn import_m3u(&mut self, input: &str) {
+        let path = crate::picker::expand_home(input);
+        let text = match std::fs::read(&path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(error) => {
+                self.set_status(format!("Cannot read {}: {error}", path.display()), true);
+                return;
+            }
+        };
+        let base = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let tracks: Vec<PathBuf> = playlist::parse_m3u(&text, &base)
+            .into_iter()
+            .filter(|p| library::is_audio(p))
+            .collect();
+        if tracks.is_empty() {
+            self.set_status("No playable files in that playlist", true);
+            return;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Imported")
+            .to_string();
+        for track in &tracks {
+            self.resolve_track(track);
+        }
+        let (index, added) = playlist::add_tracks(&mut self.playlists, &name, tracks);
+        self.playlist_state.select(Some(index));
+        let message = match playlist::save(&self.playlists) {
+            Ok(()) => format!("Imported {added} tracks into {name}"),
+            Err(error) => format!("Imported into {name} but not saved: {error:#}"),
+        };
+        self.set_status(message, false);
+    }
+
+    fn export_m3u(&mut self, index: usize, input: &str) {
+        let Some(list) = self.playlists.get(index) else {
+            return;
+        };
+        let name = list.name.clone();
+        let paths = list.tracks.clone();
+        let entries: Vec<(PathBuf, String, Option<u64>)> = paths
+            .into_iter()
+            .map(|path| {
+                let track = self.resolve_track(&path);
+                let label = if track.artist.is_empty() {
+                    track.title.clone()
+                } else {
+                    format!("{} - {}", track.artist, track.title)
+                };
+                (path, label, track.duration.map(|d| d.as_secs()))
+            })
+            .collect();
+        let target = crate::picker::expand_home(input);
+        match std::fs::write(&target, playlist::to_m3u(&entries)) {
+            Ok(()) => self.set_status(format!("Exported {name} to {}", target.display()), false),
+            Err(error) => {
+                self.set_status(format!("Cannot write {}: {error}", target.display()), true)
+            }
+        }
+    }
+
+    fn remove_from_playlists(&mut self) {
+        match self.open_playlist {
+            None => self.remove_playlist(),
+            Some(list) => self.remove_playlist_track(list),
+        }
+    }
+
+    fn confirm_remove(&mut self, index: usize, label: &str) -> bool {
+        if self.pending_remove != Some(index) {
+            self.pending_remove = Some(index);
+            self.set_status(format!("Press x again to remove {label}"), false);
+            return false;
+        }
+        self.pending_remove = None;
+        true
+    }
+
+    fn remove_playlist(&mut self) {
+        let Some(index) = self.playlist_state.selected() else {
+            return;
+        };
+        let Some(name) = self.playlists.get(index).map(|p| p.name.clone()) else {
+            return;
+        };
+        if !self.confirm_remove(index, &name) {
+            return;
+        }
+        self.playlists.remove(index);
+        self.playlist_state.select(if self.playlists.is_empty() {
+            None
+        } else {
+            Some(index.min(self.playlists.len() - 1))
+        });
+        match playlist::save(&self.playlists) {
+            Ok(()) => self.set_status(format!("Removed {name}"), false),
+            Err(error) => self.set_status(format!("Removed but not saved: {error:#}"), true),
+        }
+    }
+
+    fn remove_marked_tracks(&mut self, list: usize) {
+        let count = self.marked_tracks.len();
+        let label = format!("{count} tracks");
+        if !self.confirm_remove(usize::MAX, &label) {
+            return;
+        }
+        let Some(playlist) = self.playlists.get_mut(list) else {
+            return;
+        };
+        let marked = std::mem::take(&mut self.marked_tracks);
+        let mut index = 0;
+        playlist.tracks.retain(|_| {
+            let keep = !marked.contains(&index);
+            index += 1;
+            keep
+        });
+        let remaining = playlist.tracks.len();
+        let selected = self.playlist_track_state.selected().unwrap_or(0);
+        self.playlist_track_state.select(if remaining == 0 {
+            None
+        } else {
+            Some(selected.min(remaining - 1))
+        });
+        match playlist::save(&self.playlists) {
+            Ok(()) => self.set_status(format!("Removed {label}"), false),
+            Err(error) => self.set_status(format!("Removed but not saved: {error:#}"), true),
+        }
+    }
+
+    fn remove_playlist_track(&mut self, list: usize) {
+        if !self.marked_tracks.is_empty() {
+            self.remove_marked_tracks(list);
+            return;
+        }
+        let Some(index) = self.playlist_track_state.selected() else {
+            return;
+        };
+        let Some(playlist) = self.playlists.get(list) else {
+            return;
+        };
+        let Some(track) = playlist.tracks.get(index) else {
+            return;
+        };
+        let path = track.clone();
+        let label = self.resolve_track(&path).title;
+        if !self.confirm_remove(index, &label) {
+            return;
+        }
+        let playlist = &mut self.playlists[list];
+        playlist.tracks.remove(index);
+        let remaining = playlist.tracks.len();
+        self.playlist_track_state.select(if remaining == 0 {
+            None
+        } else {
+            Some(index.min(remaining - 1))
+        });
+        match playlist::save(&self.playlists) {
+            Ok(()) => self.set_status(format!("Removed {label}"), false),
+            Err(error) => self.set_status(format!("Removed but not saved: {error:#}"), true),
+        }
+    }
+
+    fn next_sort(&mut self) {
+        let sort = self.config.library.sort.next();
+        self.config.library.sort = sort;
+        library::sort_tracks(&mut self.all_tracks, sort);
+        self.rebuild_view();
+        match config::pick_sort(sort) {
+            Ok(()) => self.set_status(format!("Sort by {}", sort.name()), false),
+            Err(error) => self.set_status(
+                format!("Sort by {} (not saved: {error:#})", sort.name()),
+                true,
+            ),
+        }
+    }
+
+    fn toggle_clock(&mut self) {
+        let show = !self.config.clock.show;
+        self.config.clock.show = show;
+        if let Err(error) = config::pick_clock(show) {
+            self.set_status(format!("Clock setting not saved: {error:#}"), true);
         }
     }
 
@@ -1129,16 +2700,157 @@ impl App {
     }
 
     fn seek(&mut self, forward: bool) {
-        if let Active::Local(_) = self.active
-            && !self
-                .engine
-                .seek_by(forward, Duration::from_secs(5), self.duration)
+        if matches!(
+            self.active,
+            Active::Local(_) | Active::Queue(_) | Active::Extra
+        ) && !self
+            .engine
+            .seek_by(forward, Duration::from_secs(5), self.duration)
         {
             self.set_status("Seeking is not supported for this file", true);
         }
     }
 
+    fn snapshot_state(&self) -> State {
+        let playing = matches!(
+            self.active,
+            Active::Local(_) | Active::Queue(_) | Active::Extra
+        );
+        let (track, position_secs) = if playing {
+            (self.current_path.clone(), self.position().as_secs())
+        } else {
+            match &self.restore {
+                Some((path, pos)) => (Some(path.clone()), pos.as_secs()),
+                None => (None, 0),
+            }
+        };
+        State {
+            shuffle: self.shuffle,
+            repeat: self.repeat.label().to_string(),
+            volume: if self.sysvol.is_none() {
+                Some(self.volume)
+            } else {
+                None
+            },
+            track,
+            position_secs,
+        }
+    }
+
+    fn autosave(&mut self) {
+        if self.saved_at.elapsed() >= Duration::from_secs(20) {
+            self.saved_at = Instant::now();
+            state::save(&self.snapshot_state());
+        }
+    }
+
+    fn media_info(&self) -> media::Info {
+        match self.active {
+            Active::None => media::Info {
+                stopped: true,
+                ..media::Info::default()
+            },
+            Active::Spotify => media::Info {
+                title: self.sp.title.clone(),
+                artist: self.sp.artist.clone(),
+                album: self.sp.album.clone(),
+                duration: Some(Duration::from_millis(self.sp.duration_ms as u64)),
+                playing: self.sp.playing,
+                position: self.position(),
+                ..media::Info::default()
+            },
+            Active::Radio(_) => {
+                let live = self.live_title();
+                let (title, artist) = if live.is_empty() {
+                    (self.title.clone(), "Internet radio".to_string())
+                } else {
+                    (live, self.title.clone())
+                };
+                media::Info {
+                    title,
+                    artist,
+                    playing: self.is_playing(),
+                    ..media::Info::default()
+                }
+            }
+            Active::Local(_) | Active::Queue(_) | Active::Extra => media::Info {
+                title: self.title.clone(),
+                artist: self.artist.clone(),
+                album: self.album.clone(),
+                cover: self.cover_file.clone(),
+                duration: self.duration,
+                playing: self.is_playing(),
+                position: self.position(),
+                ..media::Info::default()
+            },
+        }
+    }
+
+    fn sync_media(&mut self) {
+        if self.media.is_none() {
+            return;
+        }
+        let commands = self.media.as_ref().map(Media::poll).unwrap_or_default();
+        for command in commands {
+            self.handle_media(command);
+        }
+        let info = self.media_info();
+        if let Some(media) = self.media.as_mut() {
+            media.update(&info);
+        }
+    }
+
+    fn handle_media(&mut self, command: media::Command) {
+        match command {
+            media::Command::Play => {
+                if !self.is_playing() {
+                    self.toggle_pause();
+                }
+            }
+            media::Command::Pause => {
+                if self.is_playing() {
+                    self.toggle_pause();
+                }
+            }
+            media::Command::Toggle => self.toggle_pause(),
+            media::Command::Next => self.step(true),
+            media::Command::Previous => self.step(false),
+            media::Command::Stop => {
+                self.generation += 1;
+                self.engine.stop();
+                self.loading = false;
+                self.pause_spotify();
+                self.active = Active::None;
+            }
+            media::Command::SeekBy(secs) => {
+                if matches!(
+                    self.active,
+                    Active::Local(_) | Active::Queue(_) | Active::Extra
+                ) {
+                    self.engine.seek_by(
+                        secs >= 0,
+                        Duration::from_secs(secs.unsigned_abs()),
+                        self.duration,
+                    );
+                }
+            }
+            media::Command::SetPosition(position) => {
+                if matches!(
+                    self.active,
+                    Active::Local(_) | Active::Queue(_) | Active::Extra
+                ) {
+                    self.engine.seek_to(position);
+                }
+            }
+            media::Command::Quit => self.quit = true,
+        }
+    }
+
     pub fn shutdown(&mut self) {
+        if let Some(file) = self.cover_file.take() {
+            let _ = std::fs::remove_file(file);
+        }
+        state::save(&self.snapshot_state());
         if let Some(handle) = &self.spotify {
             handle.send(SpotifyCommand::Shutdown);
         }

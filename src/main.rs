@@ -1,17 +1,25 @@
 mod analyzer;
 mod app;
 mod art;
+mod clock;
 mod config;
+mod cover;
 mod engine;
+mod eq;
 mod finder;
 mod library;
+mod lyrics;
+mod media;
 mod picker;
+mod playlist;
 mod radio;
+mod scrobble;
 #[cfg(feature = "spotify")]
 mod spotify;
 #[cfg(not(feature = "spotify"))]
 #[path = "spotify_stub.rs"]
 mod spotify;
+mod state;
 mod sysvol;
 #[cfg(test)]
 mod testutil;
@@ -22,7 +30,7 @@ mod viz;
 
 use anyhow::Result;
 use app::App;
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
 use engine::Engine;
 use ratatui::DefaultTerminal;
 use std::path::PathBuf;
@@ -33,9 +41,12 @@ const HELP: &str = "CRAB - terminal audio player
 Usage:
   crab [PATH...]   Start the player, scanning the given folders or files (default: last used folders, or ~/Music)
   crab login       Sign in to Spotify (Premium account required)
+  crab --version   Show the version
   crab --help      Show this help
 
-Radio stations are read from ~/.config/crab/stations.toml
+Press ? inside the player for the key list.
+Configuration: ~/.config/crab/config.toml
+Radio stations: ~/.config/crab/stations.toml
 ";
 
 #[cfg(unix)]
@@ -64,11 +75,12 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
         let width = terminal.size()?.width;
         app.tick(ui::bar_count(width, &app.config.visualizer));
         terminal.draw(|frame| ui::draw(frame, app))?;
-        if event::poll(Duration::from_millis(33))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            app.on_key(key);
+        if event::poll(Duration::from_millis(33))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+                Event::Mouse(mouse) => app.on_mouse(mouse),
+                _ => {}
+            }
         }
     }
     Ok(())
@@ -79,6 +91,10 @@ fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("--help") | Some("-h") => {
             print!("{HELP}");
+            return Ok(());
+        }
+        Some("--version") | Some("-V") => {
+            println!("crab {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         Some("login") => {
@@ -105,7 +121,14 @@ fn main() -> Result<()> {
     let mut app = App::new(engine, roots);
 
     let mut terminal = ratatui::init();
+    let mouse = app.config.mouse;
+    if mouse {
+        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+    }
     let result = run(&mut terminal, &mut app);
+    if mouse {
+        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    }
     ratatui::restore();
     app.shutdown();
     result
