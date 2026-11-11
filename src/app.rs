@@ -7,6 +7,7 @@ use crate::engine::{Engine, Track};
 use crate::finder::{self, Finder, FinderOutcome};
 use crate::keys::{self, Action, Key, Keymap};
 use crate::library::{self, LocalTrack, Scan};
+use crate::library_browser::{Browser, View};
 use crate::lyrics::{self, Lyrics};
 use crate::media::{self, Media};
 use crate::picker::{Outcome, Picker};
@@ -222,6 +223,14 @@ pub struct App {
     pub stations: Vec<Station>,
     pub tab: Tab,
     pub library_state: ListState,
+    pub browser: Browser,
+    pub browser_cover: Option<Cover>,
+    pub native_covers: bool,
+    pub cover_area: Option<Rect>,
+    spotify_cover: Option<Cover>,
+    spotify_cover_rx: Option<Receiver<Option<Cover>>>,
+    browser_cover_for: Option<PathBuf>,
+    browser_cover_rx: Option<Receiver<Option<Cover>>>,
     pub radio_state: ListState,
     pub active: Active,
     pub loading: bool,
@@ -250,6 +259,7 @@ pub struct App {
     pub name_prompt: Option<NamePrompt>,
     queue: Vec<LocalTrack>,
     queue_name: String,
+    queue_is_playlist: bool,
     pending_remove: Option<usize>,
     pub config: Config,
     pub themes: Vec<Theme>,
@@ -391,6 +401,14 @@ impl App {
             stations,
             tab: Tab::Library,
             library_state: ListState::default(),
+            browser: Browser::default(),
+            browser_cover: None,
+            native_covers: false,
+            cover_area: None,
+            spotify_cover: None,
+            spotify_cover_rx: None,
+            browser_cover_for: None,
+            browser_cover_rx: None,
             radio_state,
             active: Active::None,
             loading: false,
@@ -428,6 +446,7 @@ impl App {
             name_prompt: None,
             queue: Vec::new(),
             queue_name: String::new(),
+            queue_is_playlist: false,
             pending_remove: None,
             config,
             themes,
@@ -480,8 +499,8 @@ impl App {
         app
     }
 
-    pub fn queue_name(&self) -> &str {
-        &self.queue_name
+    pub fn playing_playlist(&self, name: &str) -> bool {
+        self.queue_is_playlist && matches!(self.active, Active::Queue(_)) && self.queue_name == name
     }
 
     fn set_status(&mut self, message: impl Into<String>, is_error: bool) {
@@ -806,6 +825,17 @@ impl App {
         self.meta.get(path)
     }
 
+    pub fn current_track_path(&self) -> Option<&PathBuf> {
+        if matches!(
+            self.active,
+            Active::Local(_) | Active::Queue(_) | Active::Extra
+        ) {
+            self.current_path.as_ref()
+        } else {
+            None
+        }
+    }
+
     fn resolve_track(&mut self, path: &PathBuf) -> LocalTrack {
         if let Some(track) = self.meta.get(path) {
             return track.clone();
@@ -847,8 +877,8 @@ impl App {
 
     fn matches_filter(track: &LocalTrack, words: &[String]) -> bool {
         let hay = format!(
-            "{} {} {} {}",
-            track.title, track.artist, track.album, track.folder
+            "{} {} {} {} {}",
+            track.title, track.artist, track.album_artist, track.album, track.folder
         )
         .to_lowercase();
         words.iter().all(|w| hay.contains(w.as_str()))
@@ -899,6 +929,134 @@ impl App {
             Some(0)
         });
         self.library_state.select(selection);
+        self.browser.rebuild(&self.tracks);
+        self.refresh_browser_cover();
+    }
+
+    pub fn displayed_cover(&self) -> Option<&Cover> {
+        match self.tab {
+            Tab::Library | Tab::Playlists => self.browser_cover.as_ref(),
+            Tab::Spotify => self.spotify_cover.as_ref(),
+            Tab::Radio => None,
+        }
+    }
+
+    pub fn cover_target(&self) -> Option<Rect> {
+        if self.overlay_open() {
+            None
+        } else {
+            self.cover_area
+        }
+    }
+
+    fn refresh_browser_cover(&mut self) {
+        let path = match self.tab {
+            Tab::Library if self.browser.is_album() => self
+                .browser
+                .rows
+                .first()
+                .and_then(|row| row.tracks.first())
+                .map(|track| track.path.clone()),
+            Tab::Library if self.browser.is_songs() => self
+                .library_state
+                .selected()
+                .and_then(|i| self.tracks.get(i))
+                .map(|track| track.path.clone()),
+            Tab::Library => self
+                .browser
+                .selected()
+                .and_then(|row| row.tracks.first())
+                .map(|track| track.path.clone()),
+            Tab::Playlists => {
+                let list = self
+                    .open_playlist
+                    .or_else(|| self.playlist_state.selected())
+                    .and_then(|i| self.playlists.get(i));
+                let index = if self.open_playlist.is_some() {
+                    self.playlist_track_state.selected().unwrap_or(0)
+                } else {
+                    0
+                };
+                list.and_then(|list| list.tracks.get(index)).cloned()
+            }
+            _ => None,
+        };
+        if path == self.browser_cover_for {
+            return;
+        }
+        self.browser_cover_for = path.clone();
+        self.browser_cover = None;
+        self.browser_cover_rx = path.map(|path| {
+            let (tx, rx) = channel();
+            std::thread::spawn(move || {
+                let cover = library::read_cover(&path)
+                    .as_deref()
+                    .and_then(cover::decode);
+                let _ = tx.send(cover);
+            });
+            rx
+        });
+    }
+
+    fn set_library_view(&mut self, view: View) {
+        self.visual = None;
+        self.marked.clear();
+        self.last_click = None;
+        self.browser.set_view(view, &self.tracks);
+        self.refresh_browser_cover();
+    }
+
+    fn cycle_library_view(&mut self) {
+        self.visual = None;
+        self.marked.clear();
+        self.last_click = None;
+        self.browser.cycle(&self.tracks);
+        self.refresh_browser_cover();
+    }
+
+    fn library_back(&mut self) -> bool {
+        if self.tab != Tab::Library {
+            return false;
+        }
+        let back = self.browser.back(&self.tracks);
+        if back {
+            self.last_click = None;
+            self.refresh_browser_cover();
+        }
+        back
+    }
+
+    fn play_browser(&mut self, open: bool) {
+        if open && self.browser.open(&self.tracks) {
+            self.last_click = None;
+            self.refresh_browser_cover();
+            return;
+        }
+        let selected_song = self
+            .library_state
+            .selected()
+            .and_then(|index| self.tracks.get(index));
+        let playback = if open {
+            self.browser.playback(true)
+        } else {
+            self.browser.play_group(selected_song, &self.all_tracks)
+        };
+        let Some(playback) = playback else {
+            self.set_status("Select a track, artist or album first", false);
+            return;
+        };
+        let message = format!(
+            "Playing {} ({} tracks)",
+            playback.name,
+            playback.tracks.len()
+        );
+        self.queue = playback.tracks;
+        self.queue_name = playback.name;
+        self.queue_is_playlist = false;
+        self.resume = None;
+        if self.play_queue(playback.index) {
+            self.set_status(message, false);
+        }
     }
 
     pub fn live_title(&self) -> String {
@@ -906,6 +1064,19 @@ impl App {
     }
 
     pub fn tick(&mut self, bars: usize) {
+        self.refresh_browser_cover();
+        if let Some(rx) = &self.spotify_cover_rx
+            && let Ok(cover) = rx.try_recv()
+        {
+            self.spotify_cover = cover;
+            self.spotify_cover_rx = None;
+        }
+        if let Some(rx) = &self.browser_cover_rx
+            && let Ok(cover) = rx.try_recv()
+        {
+            self.browser_cover = cover;
+            self.browser_cover_rx = None;
+        }
         self.expire_status();
         self.check_sleep();
         self.autosave();
@@ -1035,7 +1206,16 @@ impl App {
                 artist,
                 album,
                 duration_ms,
+                cover_url,
             } => {
+                self.spotify_cover = None;
+                self.spotify_cover_rx = cover_url.map(|url| {
+                    let (tx, rx) = channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(cover::download(&url));
+                    });
+                    rx
+                });
                 self.sp.title = title;
                 self.sp.artist = artist;
                 self.sp.album = album;
@@ -1261,6 +1441,7 @@ impl App {
             Active::Local(index) => self.library_state.select(Some(index)),
             Active::Queue(index) => {
                 if let Some(open) = self.open_playlist
+                    && self.queue_is_playlist
                     && self
                         .playlists
                         .get(open)
@@ -1387,6 +1568,7 @@ impl App {
             return false;
         }
         if let Some(open) = self.open_playlist
+            && self.queue_is_playlist
             && self
                 .playlists
                 .get(open)
@@ -1405,6 +1587,7 @@ impl App {
         let paths = playlist.tracks.clone();
         self.queue = paths.iter().map(|p| self.resolve_track(p)).collect();
         self.queue_name = name;
+        self.queue_is_playlist = true;
         self.play_queue(index);
     }
 
@@ -1598,6 +1781,10 @@ impl App {
     fn play_selected(&mut self) {
         match self.tab {
             Tab::Library => {
+                if !self.browser.is_songs() {
+                    self.play_browser(true);
+                    return;
+                }
                 if let Some(index) = self.library_state.selected() {
                     self.play_local(index);
                 }
@@ -1650,6 +1837,9 @@ impl App {
     }
 
     fn library_len(&self) -> usize {
+        if self.tab == Tab::Library && !self.browser.is_songs() {
+            return self.browser.rows.len();
+        }
         match (self.tab, self.open_playlist) {
             (Tab::Playlists, None) => self.playlists.len(),
             (Tab::Playlists, Some(list)) => self.playlists.get(list).map_or(0, |p| p.tracks.len()),
@@ -1658,6 +1848,9 @@ impl App {
     }
 
     fn library_state_mut(&mut self) -> &mut ListState {
+        if self.tab == Tab::Library && !self.browser.is_songs() {
+            return &mut self.browser.state;
+        }
         match (self.tab, self.open_playlist) {
             (Tab::Playlists, None) => &mut self.playlist_state,
             (Tab::Playlists, Some(_)) => &mut self.playlist_track_state,
@@ -1759,6 +1952,7 @@ impl App {
             self.tracks.clear();
             self.all_tracks.clear();
             self.library_state.select(None);
+            self.set_library_view(self.browser.view);
         }
         self.roots = roots;
         self.watcher = library::watch(&self.roots);
@@ -1899,10 +2093,18 @@ impl App {
             Action::Quit => self.quit = true,
             Action::Cancel => {
                 if self.visual.take().is_none() && !self.cancel_loading() && !self.clear_filter() {
+                    if !self.library_back() {
+                        self.close_playlist();
+                    }
+                }
+            }
+            Action::Back => {
+                if !self.library_back() {
                     self.close_playlist();
                 }
             }
-            Action::Back => self.close_playlist(),
+            Action::LibraryView if self.tab == Tab::Library => self.cycle_library_view(),
+            Action::PlayGroup if self.tab == Tab::Library => self.play_browser(false),
             Action::Search => match self.tab {
                 Tab::Library => self.filtering = true,
                 Tab::Radio => self.open_finder(),
@@ -2004,7 +2206,7 @@ impl App {
         if self.visual.take().is_some() {
             return;
         }
-        let anchor = if self.tab == Tab::Library {
+        let anchor = if self.in_folders() {
             self.library_state.selected()
         } else if self.in_open_playlist() {
             self.playlist_track_state.selected()
@@ -2196,7 +2398,13 @@ impl App {
     }
 
     fn toggle_favorite(&mut self) {
-        let paths: Vec<PathBuf> = if self.tab == Tab::Library {
+        let paths: Vec<PathBuf> = if self.tab == Tab::Library && !self.browser.is_songs() {
+            self.browser
+                .selected()
+                .into_iter()
+                .flat_map(|row| row.tracks.iter().map(|track| track.path.clone()))
+                .collect()
+        } else if self.tab == Tab::Library {
             if self.marked.is_empty() {
                 self.library_state
                     .selected()
@@ -2270,6 +2478,13 @@ impl App {
                     None => self.set_status("Sort by path, title, artist or album", true),
                 },
             },
+            "view" => match arg.and_then(View::from_name) {
+                Some(view) => {
+                    self.tab = Tab::Library;
+                    self.set_library_view(view);
+                }
+                None => self.set_status("Usage: view songs|artists|albums", true),
+            },
             "sleep" => match arg {
                 None => self.cycle_sleep(),
                 Some("off") | Some("0") => self.set_sleep(0),
@@ -2341,6 +2556,9 @@ impl App {
             }
             "save" => {
                 self.tab = Tab::Library;
+                if !self.browser.is_songs() {
+                    self.set_library_view(View::Songs);
+                }
                 self.save_marked();
             }
             "tab" => {
@@ -2359,6 +2577,7 @@ impl App {
             "play" if !args.is_empty() => match self.find_track(&args) {
                 Some(index) => {
                     self.tab = Tab::Library;
+                    self.set_library_view(View::Songs);
                     self.library_state.select(Some(index));
                     self.play_local(index);
                 }
@@ -2372,6 +2591,7 @@ impl App {
             "goto" => match self.find_track(&args) {
                 Some(index) if !args.is_empty() => {
                     self.tab = Tab::Library;
+                    self.set_library_view(View::Songs);
                     self.library_state.select(Some(index));
                 }
                 _ => self.set_status("Usage: goto <text> (no track matches)", true),
@@ -2630,7 +2850,7 @@ impl App {
     }
 
     fn in_folders(&self) -> bool {
-        self.tab == Tab::Library
+        self.tab == Tab::Library && self.browser.is_songs()
     }
 
     fn in_playlists(&self) -> bool {
@@ -2826,23 +3046,29 @@ impl App {
         let mut added: Vec<LocalTrack> = Vec::new();
         match self.tab {
             Tab::Library => {
-                let marked: Vec<LocalTrack> = self
-                    .tracks
-                    .iter()
-                    .filter(|t| self.marked.contains(&t.path))
-                    .cloned()
-                    .collect();
-                if marked.is_empty() {
-                    if let Some(track) = self
-                        .library_state
-                        .selected()
-                        .and_then(|i| self.tracks.get(i))
-                    {
-                        added.push(track.clone());
+                if !self.browser.is_songs() {
+                    if let Some(row) = self.browser.selected() {
+                        added = row.tracks.clone();
                     }
                 } else {
-                    added = marked;
-                    self.marked.clear();
+                    let marked: Vec<LocalTrack> = self
+                        .tracks
+                        .iter()
+                        .filter(|t| self.marked.contains(&t.path))
+                        .cloned()
+                        .collect();
+                    if marked.is_empty() {
+                        if let Some(track) = self
+                            .library_state
+                            .selected()
+                            .and_then(|i| self.tracks.get(i))
+                        {
+                            added.push(track.clone());
+                        }
+                    } else {
+                        added = marked;
+                        self.marked.clear();
+                    }
                 }
             }
             Tab::Playlists => {

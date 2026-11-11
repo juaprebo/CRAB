@@ -1,8 +1,12 @@
 use crate::art::Cell;
+use base64::Engine;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-const MAX_SIDE: u32 = 128;
+const MAX_SIDE: u32 = 1024;
 
 pub struct Cover {
+    pub id: u64,
+    pub png_base64: String,
     width: u32,
     height: u32,
     rgb: Vec<u8>,
@@ -15,7 +19,12 @@ pub fn decode(bytes: &[u8]) -> Option<Cover> {
     if width == 0 || height == 0 {
         return None;
     }
+    let mut png = std::io::Cursor::new(Vec::new());
+    small.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     Some(Cover {
+        id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        png_base64: base64::engine::general_purpose::STANDARD.encode(png.into_inner()),
         width,
         height,
         rgb: small.into_raw(),
@@ -23,6 +32,9 @@ pub fn decode(bytes: &[u8]) -> Option<Cover> {
 }
 
 impl Cover {
+    pub fn aspect(&self) -> f32 {
+        self.width as f32 / self.height as f32
+    }
     fn pixel(&self, u: f32, v: f32) -> [u8; 3] {
         let x = ((u * self.width as f32) as u32).min(self.width - 1);
         let y = ((v * self.height as f32) as u32).min(self.height - 1);
@@ -71,6 +83,22 @@ impl Cover {
         }
         cells
     }
+}
+
+pub fn download(url: &str) -> Option<Cover> {
+    use std::io::Read;
+    const LIMIT: u64 = 8 * 1024 * 1024;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let response = client.get(url).send().ok()?.error_for_status().ok()?;
+    let mut bytes = Vec::new();
+    response.take(LIMIT + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > LIMIT {
+        return None;
+    }
+    decode(&bytes)
 }
 
 #[cfg(test)]

@@ -3,8 +3,10 @@ use crate::art::{self, Art, Cell};
 use crate::clock;
 use crate::config::Config;
 use crate::config::{VisualizerConfig, VizStyle};
+use crate::cover::Cover;
 use crate::finder::{Finder, Focus};
 use crate::keys::Action;
+use crate::library_browser::{Browser, duration_label};
 use crate::picker::Picker;
 use crate::spotify;
 use crate::theme::{Theme, from_hsl, to_color, to_hex};
@@ -125,6 +127,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_header(frame, header, app, &theme);
     app.hit.tabs = locate_tabs(frame.buffer_mut(), header);
+    app.cover_area = None;
+    let body = if matches!(app.tab, Tab::Library | Tab::Playlists | Tab::Spotify) {
+        let (content, image) = draw_cover_panel(
+            frame,
+            body,
+            app.displayed_cover(),
+            app.native_covers,
+            &theme,
+        );
+        app.cover_area = image;
+        content
+    } else {
+        body
+    };
     app.hit.body = body;
 
     match app.tab {
@@ -133,7 +149,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Radio => draw_radio(frame, body, app, &theme),
         Tab::Spotify => draw_spotify(frame, body, app, &theme),
     }
-    draw_art(frame, body, app, &theme);
+    if app.tab != Tab::Library || app.browser.is_songs() {
+        draw_art(frame, body, app, &theme);
+    }
     draw_spectrum(frame, viz, app, &theme);
     draw_now_playing(frame, now, app, &theme);
     draw_footer(frame, footer, app, &theme);
@@ -524,10 +542,9 @@ fn draw_art(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let cells: Vec<Cell> = match (&app.cover, art) {
-        (Some(cover), _) => cover.cells(inner.width, inner.height),
-        (None, Art::Crab) => art::crab_cells(inner.width, inner.height),
-        (None, Art::Text(lines)) => art::text_cells(lines, inner.width, inner.height),
+    let cells: Vec<Cell> = match art {
+        Art::Crab => art::crab_cells(inner.width, inner.height),
+        Art::Text(lines) => art::text_cells(lines, inner.width, inner.height),
     };
     paint_art(
         frame.buffer_mut(),
@@ -903,6 +920,36 @@ fn highlight(theme: &Theme) -> Style {
 }
 
 fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    if !app.browser.is_songs() {
+        let playing = app.current_track_path().cloned();
+        let filter = if app.filtering {
+            format!(" - filter: {}█", app.filter)
+        } else if app.filter.is_empty() {
+            String::new()
+        } else {
+            format!(" - filter: {}", app.filter)
+        };
+        let context = format!(
+            "{}{}{}",
+            filter,
+            if app.only_favorites {
+                " - favorites"
+            } else {
+                ""
+            },
+            if app.scanning { " - scanning" } else { "" }
+        );
+        app.hit.body = draw_library_browser(
+            frame,
+            area,
+            &mut app.browser,
+            app.browser_cover.as_ref(),
+            playing.as_ref(),
+            &context,
+            theme,
+        );
+        return;
+    }
     let folders = app.roots_label();
     let marked = if app.marked.is_empty() {
         String::new()
@@ -993,6 +1040,110 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     );
 }
 
+fn draw_cover_panel(
+    frame: &mut Frame,
+    area: Rect,
+    cover: Option<&Cover>,
+    native: bool,
+    theme: &Theme,
+) -> (Rect, Option<Rect>) {
+    if area.width < 80 {
+        return (area, None);
+    }
+    let width = (area.width / 3).clamp(28, 40);
+    let [list, art] =
+        Layout::horizontal([Constraint::Min(35), Constraint::Length(width)]).areas(area);
+    let block = panel(theme, "Album cover".into());
+    let inner = block.inner(art);
+    frame.render_widget(block, art);
+    if let Some(cover) = cover {
+        if !native {
+            let cells = cover.cells(inner.width, inner.height);
+            paint_art(frame.buffer_mut(), &cells, inner, theme, 1.0);
+        }
+    } else {
+        frame.render_widget(
+            Paragraph::new("No cover art")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.dim)),
+            inner,
+        );
+    }
+    (list, Some(inner))
+}
+
+fn draw_library_browser(
+    frame: &mut Frame,
+    area: Rect,
+    browser: &mut Browser,
+    _cover: Option<&Cover>,
+    playing: Option<&std::path::PathBuf>,
+    context: &str,
+    theme: &Theme,
+) -> Rect {
+    let list_area = area;
+    let title = if browser.is_album() {
+        let duration = duration_label(browser.rows.iter().flat_map(|row| row.tracks.iter()));
+        format!(
+            "{} - {} track{} · {}{context}",
+            browser.title,
+            browser.rows.len(),
+            if browser.rows.len() == 1 { "" } else { "s" },
+            duration
+        )
+    } else {
+        format!(
+            "Library - {} - {} groups{context}",
+            browser.title,
+            browser.rows.len()
+        )
+    };
+    if browser.rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matching music. Clear the filter or press o to choose a folder.")
+                .style(Style::default().fg(theme.dim))
+                .wrap(Wrap { trim: true })
+                .block(panel(theme, title)),
+            list_area,
+        );
+    } else {
+        let items: Vec<ListItem> = browser
+            .rows
+            .iter()
+            .map(|row| {
+                let active = row.is_song()
+                    && row
+                        .tracks
+                        .first()
+                        .is_some_and(|track| Some(&track.path) == playing);
+                let marker = if active {
+                    "♪ "
+                } else if row.is_song() {
+                    "  "
+                } else {
+                    "› "
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(marker, Style::default().fg(theme.accent)),
+                    Span::styled(
+                        row.title.clone(),
+                        Style::default().fg(if active { theme.accent } else { theme.text }),
+                    ),
+                    Span::styled(format!("   {}", row.detail), Style::default().fg(theme.dim)),
+                ]))
+            })
+            .collect();
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(panel(theme, title))
+                .highlight_style(highlight(theme)),
+            list_area,
+            &mut browser.state,
+        );
+    }
+    list_area
+}
+
 fn draw_playlists(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let row_width = area.width.saturating_sub(4) as usize;
     let (title, items, message): (String, Vec<ListItem>, &str) = match app.open_playlist {
@@ -1001,8 +1152,7 @@ fn draw_playlists(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
                 .playlists
                 .iter()
                 .map(|list| {
-                    let playing =
-                        matches!(app.active, Active::Queue(_)) && app.queue_name() == list.name;
+                    let playing = app.playing_playlist(&list.name);
                     let count = format!("{} tracks", list.tracks.len());
                     let name_width = row_width.saturating_sub(count.chars().count() + 4);
                     let name = truncate(&list.name, name_width);
@@ -1045,7 +1195,7 @@ fn draw_playlists(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
                         .meta(path)
                         .cloned()
                         .unwrap_or_else(|| crate::library::to_track(path.clone()));
-                    let playing = app.active == Active::Queue(i) && app.queue_name() == name;
+                    let playing = app.active == Active::Queue(i) && app.playing_playlist(&name);
                     let missing = !path.exists();
                     let marker = if playing {
                         "♪ "
@@ -1194,6 +1344,14 @@ const HELP: &[(&str, &str)] = &[
     ),
     ("@cancel", "cancel, clear the filter or go back"),
     ("", "Library"),
+    ("@library-view", "switch songs, artists and albums"),
+    ("@play", "open artist / album, or play album tracks"),
+    (
+        "@play-group",
+        "play the selected group or the selected song's album",
+    ),
+    ("@queue", "queue the selected artist, album or track"),
+    ("@back", "back to artists or albums"),
     ("@search", "filter by title, artist or album"),
     ("@sort", "sort by path, title, artist or album"),
     ("@mark / @mark-all", "mark a track / mark all"),
@@ -1247,6 +1405,7 @@ const HELP: &[(&str, &str)] = &[
         "playback; :play <text> plays a match",
     ),
     (":goto <text>", "select the first track that matches"),
+    (":view songs|artists|albums", "choose the library view"),
     (":find <text>", "filter the library, :find alone clears it"),
     (":add <text>", "queue every track that matches"),
     (":fav :favs", "toggle a favorite, show only favorites"),
@@ -1882,11 +2041,22 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         keys.insert(3, (k(Action::Remove), "remove"));
     }
     if app.tab == Tab::Library && !app.filtering {
-        keys.insert(2, (k(Action::Search), "filter"));
-        keys.insert(3, (k(Action::Sort), "sort"));
-        keys.insert(4, (k(Action::Mark), "mark"));
-        keys.insert(5, (k(Action::MarkAll), "all"));
-        keys.insert(6, (k(Action::Save), "save list"));
+        if !app.browser.is_songs() {
+            keys[1] = (k(Action::Play), "open / play");
+            keys.insert(2, (k(Action::LibraryView), "view"));
+            keys.insert(3, (k(Action::PlayGroup), "play group"));
+            keys.insert(4, (k(Action::Queue), "queue"));
+            keys.insert(5, (k(Action::Back), "back"));
+            keys.insert(6, (k(Action::Search), "filter"));
+        } else {
+            keys.insert(2, (k(Action::Search), "filter"));
+            keys.insert(3, (k(Action::Sort), "sort"));
+            keys.insert(4, (k(Action::Mark), "mark"));
+            keys.insert(5, (k(Action::MarkAll), "all"));
+            keys.insert(6, (k(Action::Save), "save list"));
+            keys.insert(2, (k(Action::LibraryView), "view"));
+            keys.insert(3, (k(Action::PlayGroup), "play album"));
+        }
     }
     if app.tab == Tab::Playlists {
         if app.open_playlist.is_none() {
@@ -2097,6 +2267,101 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn cover_panel_has_one_layout_for_all_sources_and_hides_when_narrow() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let theme = &builtin_themes()[0];
+        let mut terminal = Terminal::new(TestBackend::new(110, 18)).unwrap();
+        let mut expected = None;
+        for native in [false, true] {
+            terminal
+                .draw(|frame| {
+                    let layout = draw_cover_panel(frame, frame.area(), None, native, theme);
+                    if let Some(previous) = expected {
+                        assert_eq!(layout, previous);
+                    }
+                    expected = Some(layout);
+                    assert!(layout.1.is_some());
+                    assert!(layout.0.width >= 35);
+                })
+                .unwrap();
+            assert!(render_text(&terminal).contains("Album cover"));
+        }
+        let mut narrow = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        narrow
+            .draw(|frame| {
+                assert_eq!(
+                    draw_cover_panel(frame, frame.area(), None, false, theme),
+                    (frame.area(), None)
+                );
+            })
+            .unwrap();
+        assert!(!render_text(&narrow).contains("Album cover"));
+    }
+
+    #[test]
+    fn library_browser_draws_groups_albums_and_small_terminals() {
+        use crate::library_browser::View;
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut track = crate::library::to_track("/music/track.wav".into());
+        track.artist = "Test artist".into();
+        track.album = "Test album".into();
+        track.title = "Test song".into();
+        track.track = 1;
+        track.duration = Some(Duration::from_secs(125));
+        let tracks = vec![track];
+        let mut browser = Browser::default();
+        browser.set_view(View::Artists, &tracks);
+        let theme = &builtin_themes()[0];
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_library_browser(frame, frame.area(), &mut browser, None, None, "", theme);
+            })
+            .unwrap();
+        let text = render_text(&terminal);
+        assert!(text.contains("Artists"));
+        assert!(text.contains("Test artist"));
+        assert!(text.contains("1 album"));
+        browser.open(&tracks);
+        browser.open(&tracks);
+        terminal
+            .draw(|frame| {
+                draw_library_browser(
+                    frame,
+                    frame.area(),
+                    &mut browser,
+                    None,
+                    Some(&tracks[0].path),
+                    "",
+                    theme,
+                );
+            })
+            .unwrap();
+        let text = render_text(&terminal);
+        assert!(text.contains("Test album"));
+        assert!(text.contains("Test song"));
+        assert!(text.contains("2:05"));
+        assert!(!text.contains("Album cover"));
+        assert!(text.contains('♪'));
+        for width in [42, 1] {
+            let mut small = Terminal::new(TestBackend::new(width, 4)).unwrap();
+            small
+                .draw(|frame| {
+                    draw_library_browser(frame, frame.area(), &mut browser, None, None, "", theme);
+                })
+                .unwrap();
+            assert!(!render_text(&small).contains("Album cover"));
+        }
+        browser.rebuild(&[]);
+        terminal
+            .draw(|frame| {
+                draw_library_browser(frame, frame.area(), &mut browser, None, None, "", theme);
+            })
+            .unwrap();
+        assert!(render_text(&terminal).contains("No matching music"));
     }
 
     #[test]

@@ -73,6 +73,8 @@ Without arguments CRAB opens the folders you used last time, or `~/Music` the fi
 | `Q` | add the marked tracks, the selected track or the open playlist to the queue |
 | `Z` | show the queue (Enter plays now, `x` removes, `X` clears) |
 | `S` | sort the library by path, title, artist or album |
+| `b` | switch the library between songs, artists and albums |
+| `P` | play the selected artist or album; in Songs, play the selected song's whole album |
 | `z` | sleep timer: 15, 30, 60 and 90 minutes, then off |
 | `y` | next equalizer preset |
 | `L` | lyrics of the current track |
@@ -96,9 +98,23 @@ Without arguments CRAB opens the folders you used last time, or `~/Music` the fi
 | `q` | quit |
 | Esc | cancel what is in progress (a station that is connecting, a dialog); it never quits |
 
-### Playback
+### Browsing artists and albums
+
+In the Library tab, `b` cycles through Songs, Artists and Albums. You can also jump directly with `:view songs`, `:view artists` or `:view albums`.
+
+Enter opens an artist's albums, then an album's tracks. Tracks are ordered by disc and track number. Enter on a track plays from that point through the album; `P` starts the whole album (or the selected artist), and `Q` adds the selected artist, album or track to the up-next queue. Backspace or Esc goes back, returning to Songs from the top level. Esc clears an active filter first.
+
+In Songs, `P` plays the entire album of the selected song, starting at its first track, including tracks hidden by the current filter. Files without an album tag use their folder as the album.
+
+Album views show the track count and total duration, plus a cover preview when the terminal is wide enough. An unknown duration is marked as unknown, or with `+` when only a partial total is available. `/` filters the grouped views too, and `F` limits them to favorites. `f` adds or removes all tracks of the selected group from favorites.
+
+Grouping uses the album artist tag when present, so compilations stay together. Albums with the same title but different album artists stay separate. Files without an album tag are grouped by their folder.
+
+### Playback options
 
 ![Synced lyrics next to the library](docs/lyrics.png)
+
+Library, Playlists and Spotify share the same side panel for cover art when the terminal is at least 80 columns wide. In local views it previews the selected track or group; in Spotify it follows the current track. Kitty displays high-resolution images automatically. Other terminals, including tmux and screen sessions, use colored half blocks. Set `CRAB_COVER_MODE=blocks` to force that fallback. The panel disappears in narrow windows so the music list remains usable.
 
 Tags are read with lofty. Cover art comes from the file itself or from `cover`, `folder`, `front`, `album` or `albumart` (`.jpg` or `.png`) in the same folder.
 
@@ -160,6 +176,7 @@ In the `vim` preset a number typed before an action repeats it: `5j` moves five 
 | Command | Does |
 | --- | --- |
 | `:sort album` | sort by path, title, artist or album |
+| `:view albums` | browse songs, artists or albums |
 | `:sleep 30` / `:sleep off` | sleep timer in minutes |
 | `:eq rock` | equalizer preset |
 | `:repeat all` / `:shuffle on` | playback modes |
@@ -192,7 +209,7 @@ The same thing in `config.toml`:
     next = ["n", ">", "ctrl-n"]
     lyrics = []            # no key
 
-A binding replaces the keys of that action and takes a key away from any other action that used it. A key is a single character, or one of `space`, `enter`, `esc`, `tab`, `backtab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `f1` to `f12`, optionally with the `ctrl-` prefix. The action names are the ones `:map` accepts: quit, cancel, back, search, repeat, queue, queue-view, help, mark, mark-all, sort, track-mark, track-mark-all, save, remove, open-list, import, export, sleep, eq, lyrics, visualizer, clock, folder, tab-next, tab-prev, tab-1 to tab-4, up, down, page-up, page-down, half-up, half-down, top, bottom, play, pause, next, prev, seek-forward, seek-back, volume-up, volume-down, mute, theme, reload, shuffle, visual, command, stats, favorite and favorites.
+A binding replaces the keys of that action and takes a key away from any other action that used it. A key is a single character, or one of `space`, `enter`, `esc`, `tab`, `backtab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `f1` to `f12`, optionally with the `ctrl-` prefix. The action names are the ones `:map` accepts: quit, cancel, back, search, repeat, queue, queue-view, help, mark, mark-all, sort, library-view, play-group, track-mark, track-mark-all, save, remove, open-list, import, export, sleep, eq, lyrics, visualizer, clock, folder, tab-next, tab-prev, tab-1 to tab-4, up, down, page-up, page-down, half-up, half-down, top, bottom, play, pause, next, prev, seek-forward, seek-back, volume-up, volume-down, mute, theme, reload, shuffle, visual, command, stats, favorite and favorites.
 
 The key help (`?`) and the footer always show the keys you have now.
 

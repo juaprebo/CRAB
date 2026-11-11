@@ -39,6 +39,7 @@ pub enum SpotifyEvent {
         artist: String,
         album: String,
         duration_ms: u32,
+        cover_url: Option<String>,
     },
     Playing(u32),
     Paused(u32),
@@ -217,6 +218,7 @@ async fn run(
                             artist,
                             album,
                             duration_ms: audio_item.duration_ms,
+                            cover_url: audio_item.covers.iter().max_by_key(|cover| i64::from(cover.width.max(0)) * i64::from(cover.height.max(0))).map(|cover| cover.url.clone()),
                         });
                     }
                     PlayerEvent::Playing { position_ms, .. } => {

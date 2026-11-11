@@ -5,11 +5,13 @@ mod clock;
 mod commands;
 mod config;
 mod cover;
+mod cover_display;
 mod engine;
 mod eq;
 mod finder;
 mod keys;
 mod library;
+mod library_browser;
 mod lyrics;
 mod media;
 mod picker;
@@ -74,10 +76,33 @@ fn redirect_stderr() {
 fn redirect_stderr() {}
 
 fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
+    let mut covers = cover_display::Display::new();
+    app.native_covers = covers.enabled;
+    let result = run_loop(terminal, app, &mut covers);
+    let _ = covers.clear(&mut std::io::stdout());
+    result
+}
+
+fn run_loop(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    covers: &mut cover_display::Display,
+) -> Result<()> {
     while !app.quit {
         let width = terminal.size()?.width;
         app.tick(ui::bar_count(width, &app.config.visualizer));
         terminal.draw(|frame| ui::draw(frame, app))?;
+        let pixels = crossterm::terminal::window_size()
+            .ok()
+            .filter(|size| size.columns > 0 && size.rows > 0 && size.width > 0 && size.height > 0)
+            .map(|size| (size.width / size.columns, size.height / size.rows))
+            .unwrap_or((8, 16));
+        covers.render(
+            &mut std::io::stdout(),
+            app.displayed_cover(),
+            app.cover_target(),
+            pixels,
+        )?;
         if event::poll(Duration::from_millis(33))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),

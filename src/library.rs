@@ -15,6 +15,7 @@ pub struct LocalTrack {
     pub title: String,
     pub folder: String,
     pub artist: String,
+    pub album_artist: String,
     pub album: String,
     pub track: u32,
     pub disc: u32,
@@ -66,6 +67,7 @@ pub fn to_track(path: PathBuf) -> LocalTrack {
         title,
         folder,
         artist: String::new(),
+        album_artist: String::new(),
         album: String::new(),
         track: 0,
         disc: 0,
@@ -84,6 +86,11 @@ fn parse_gain(text: &str) -> Option<f32> {
 }
 
 fn apply_tag(track: &mut LocalTrack, tag: &Tag) {
+    track.album_artist = tag
+        .get_string(ItemKey::AlbumArtist)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if let Some(title) = tag.title().filter(|t| !t.trim().is_empty()) {
         track.title = title.trim().to_string();
     }
@@ -370,6 +377,7 @@ mod tests {
         tag.set_title(title.to_string());
         tag.set_artist(artist.to_string());
         tag.set_album(album.to_string());
+        tag.insert_text(ItemKey::AlbumArtist, "Album Artist".into());
         tag.set_track(n);
         tag.insert_text(ItemKey::ReplayGainTrackGain, "-6.50 dB".to_string());
         tag.save_to_path(&path, WriteOptions::default()).unwrap();
@@ -390,6 +398,7 @@ mod tests {
         let track = read_track(a.clone());
         assert_eq!(track.title, "Zebra");
         assert_eq!(track.artist, "Beta Band");
+        assert_eq!(track.album_artist, "Album Artist");
         assert_eq!(track.album, "Second");
         assert_eq!(track.track, 1);
         assert_eq!(track.gain_db, Some(-6.5));

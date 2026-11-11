@@ -20,6 +20,7 @@ pub enum SpotifyEvent {
         artist: String,
         album: String,
         duration_ms: u32,
+        cover_url: Option<String>,
     },
     Playing(u32),
     Paused(u32),

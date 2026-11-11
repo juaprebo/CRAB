@@ -14,6 +14,8 @@ pub enum Action {
     Mark,
     MarkAll,
     Sort,
+    LibraryView,
+    PlayGroup,
     TrackMark,
     TrackMarkAll,
     Save,
@@ -90,6 +92,8 @@ pub const TABLE: &[(Action, &str, &[&str], &[&str])] = &[
     (Action::Mark, "mark", &["a"], &[]),
     (Action::MarkAll, "mark-all", &["A"], &[]),
     (Action::Sort, "sort", &["S"], &[]),
+    (Action::LibraryView, "library-view", &["b"], &[]),
+    (Action::PlayGroup, "play-group", &["P"], &[]),
     (Action::TrackMark, "track-mark", &["d"], &[]),
     (Action::TrackMarkAll, "track-mark-all", &["D"], &[]),
     (Action::Save, "save", &["w"], &[]),
@@ -434,6 +438,8 @@ mod tests {
         let (map, warnings) = Keymap::build(Preset::Vim, Preset::Vim, &BTreeMap::new());
         assert!(warnings.is_empty());
         let press = |c| event(KeyCode::Char(c), KeyModifiers::NONE);
+        assert_eq!(map.action(&press('b')), Some(Action::LibraryView));
+        assert_eq!(map.action(&press('P')), Some(Action::PlayGroup));
         assert_eq!(map.action(&press('z')), Some(Action::Sleep));
         assert_eq!(map.action(&press('G')), Some(Action::Bottom));
         assert_eq!(

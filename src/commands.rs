@@ -5,7 +5,7 @@ pub const COMMANDS: &[&str] = &[
     "quit", "help", "sort", "sleep", "eq", "repeat", "shuffle", "volume", "lyrics", "theme", "viz",
     "clock", "reload", "folder", "import", "export", "save", "tab", "play", "pause", "next",
     "prev", "stop", "seek", "queue", "map", "unmap", "reset", "keys", "stats", "fav", "favs",
-    "goto", "find", "add", "mute", "fade",
+    "goto", "find", "add", "mute", "fade", "view",
 ];
 
 pub fn split(line: &str) -> (String, Vec<String>) {
@@ -31,6 +31,7 @@ fn values(name: &str, themes: &[String]) -> Vec<String> {
     let words = |list: &[&str]| list.iter().map(|w| w.to_string()).collect::<Vec<_>>();
     match name {
         "sort" => words(&["path", "title", "artist", "album"]),
+        "view" => words(&["songs", "artists", "albums"]),
         "eq" => crate::eq::PRESETS
             .iter()
             .map(|(n, _)| n.to_string())
@@ -150,6 +151,7 @@ mod tests {
         assert_eq!(base, "eq ");
         assert_eq!(list, ["rock"]);
         assert_eq!(candidates("sort ", &none).1.len(), 4);
+        assert_eq!(candidates("view al", &none).1, ["albums"]);
         assert_eq!(candidates("vol 5", &none).1.len(), 0);
         let themes = vec!["synthwave".to_string(), "solar".to_string()];
         assert_eq!(candidates("theme s", &themes).1.len(), 2);

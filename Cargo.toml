@@ -22,6 +22,7 @@ spotify = [
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 crossterm = "0.29"
 dirs = "7"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
