@@ -9,6 +9,7 @@ pub struct State {
     pub volume: Option<f32>,
     pub track: Option<PathBuf>,
     pub position_secs: u64,
+    pub favorites: Vec<PathBuf>,
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -52,6 +53,7 @@ mod tests {
             volume: Some(0.4),
             track: Some(PathBuf::from("/music/a.mp3")),
             position_secs: 93,
+            favorites: vec![PathBuf::from("/music/b.mp3")],
         };
         let text = toml::to_string_pretty(&state).unwrap();
         assert_eq!(toml::from_str::<State>(&text).unwrap(), state);

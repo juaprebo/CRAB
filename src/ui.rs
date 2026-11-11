@@ -909,6 +909,11 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     } else {
         format!(" - {} marked", app.marked.len())
     };
+    let favorites = if app.only_favorites {
+        " - favorites"
+    } else {
+        ""
+    };
     let filter = if app.filtering {
         format!(" - filter: {}█", app.filter)
     } else if app.filter.is_empty() {
@@ -920,7 +925,7 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         format!("Library - {folders} - scanning")
     } else {
         format!(
-            "Library - {folders} - {} tracks{marked}{filter}",
+            "Library - {folders} - {} tracks{favorites}{marked}{filter}",
             app.tracks.len()
         )
     };
@@ -934,6 +939,8 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
                 "♪ "
             } else if app.marked.contains(&track.path) {
                 "+ "
+            } else if app.favorites.contains(&track.path) {
+                "♥ "
             } else {
                 "  "
             };
@@ -961,7 +968,9 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         } else {
             "No audio files found. Press o to choose a folder"
         };
-        let message = if app.filter.is_empty() {
+        let message = if app.only_favorites && app.filter.is_empty() {
+            "No favorites yet, press f on a track"
+        } else if app.filter.is_empty() {
             message
         } else {
             "Nothing matches the filter"
@@ -1207,7 +1216,12 @@ const HELP: &[(&str, &str)] = &[
     ("@search", "find stations"),
     ("@remove", "remove the selected station"),
     ("", "Other"),
-    ("@command", "command line (tab completes)"),
+    (
+        "@command",
+        "command line (tab completes, up/down for history)",
+    ),
+    ("@favorite", "add or remove favorites"),
+    ("@favorites", "show only favorites"),
     ("@stats", "show or hide CPU and memory used by CRAB"),
     ("@visualizer", "next visualizer"),
     ("@clock", "show or hide the clock"),
@@ -1224,12 +1238,28 @@ const HELP: &[(&str, &str)] = &[
         ":volume :seek :theme :viz",
         ":volume 60, :seek 1:30, :theme synthwave",
     ),
+    (
+        ":shuffle :mute :fade",
+        ":fade 3 sets the crossfade in seconds",
+    ),
+    (
+        ":play :pause :next :prev :stop",
+        "playback; :play <text> plays a match",
+    ),
+    (":goto <text>", "select the first track that matches"),
+    (":find <text>", "filter the library, :find alone clears it"),
+    (":add <text>", "queue every track that matches"),
+    (":fav :favs", "toggle a favorite, show only favorites"),
+    (":queue :lyrics :clock :stats", "same as their keys"),
     (":tab :save :import :export", "jump and open dialogs"),
+    (":folder :reload :help :quit", "same as their keys"),
+    (":keys crab|vim|custom", "switch the key preset"),
     (
         ":map <action> <key>...",
         "rebind an action and save it to [keys]",
     ),
     (":unmap <action>", "remove the keys of an action"),
+    (":reset <action>", "restore the original keys of an action"),
     (":map <action>", "show the keys of an action"),
 ];
 
@@ -1777,6 +1807,31 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             ])),
             area,
         );
+        let (hints, selected) = app.cmd_hints();
+        let used = input.chars().count() as u16 + 4;
+        if !hints.is_empty() && area.width > used + 4 {
+            let mut spans = Vec::new();
+            let mut width = 0u16;
+            let room = area.width - used;
+            for (i, hint) in hints.iter().enumerate() {
+                let w = hint.chars().count() as u16 + 2;
+                if width + w > room {
+                    spans.push(Span::styled("…", Style::default().fg(theme.dim)));
+                    break;
+                }
+                width += w;
+                let style = if Some(i) == selected {
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.dim)
+                };
+                spans.push(Span::styled(format!("{hint}  "), style));
+            }
+            let rect = Rect::new(area.x + used, area.y, area.width - used, 1);
+            frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+        }
         return;
     }
     if !app.status.is_empty() {

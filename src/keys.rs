@@ -56,6 +56,8 @@ pub enum Action {
     Visual,
     Command,
     Stats,
+    Favorite,
+    Favorites,
 }
 
 impl Action {
@@ -130,6 +132,8 @@ pub const TABLE: &[(Action, &str, &[&str], &[&str])] = &[
     (Action::Visual, "visual", &[], &["V"]),
     (Action::Command, "command", &[":"], &[]),
     (Action::Stats, "stats", &["I"], &[]),
+    (Action::Favorite, "favorite", &["f"], &[]),
+    (Action::Favorites, "favorites", &["F"], &[]),
 ];
 
 pub fn action_name(action: Action) -> &'static str {

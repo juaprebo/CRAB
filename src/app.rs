@@ -26,7 +26,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -129,6 +129,12 @@ impl Repeat {
 enum Resume {
     Local(PathBuf),
     Queue(usize),
+}
+
+struct CmdCycle {
+    base: String,
+    list: Vec<String>,
+    index: usize,
 }
 
 struct Visual {
@@ -251,6 +257,12 @@ pub struct App {
     pending_g: bool,
     visual: Option<Visual>,
     pub cmdline: Option<String>,
+    cmd_cycle: Option<CmdCycle>,
+    cmd_history: Vec<String>,
+    cmd_pos: Option<usize>,
+    cmd_draft: String,
+    pub favorites: BTreeSet<PathBuf>,
+    pub only_favorites: bool,
     pub lyrics: Option<Lyrics>,
     pub lyrics_view: Option<usize>,
     scrobbler: Option<Scrobbler>,
@@ -414,6 +426,12 @@ impl App {
             pending_g: false,
             visual: None,
             cmdline: None,
+            cmd_cycle: None,
+            cmd_history: Vec::new(),
+            cmd_pos: None,
+            cmd_draft: String::new(),
+            favorites: saved.favorites.iter().cloned().collect(),
+            only_favorites: false,
             lyrics: None,
             lyrics_view: None,
             scrobbler: None,
@@ -828,15 +846,17 @@ impl App {
             .split_whitespace()
             .map(|w| w.to_lowercase())
             .collect();
-        self.tracks = if words.is_empty() {
-            self.all_tracks.clone()
-        } else {
-            self.all_tracks
-                .iter()
-                .filter(|t| Self::matches_filter(t, &words))
-                .cloned()
-                .collect()
-        };
+        let favorites_only = self.only_favorites;
+        let tracks: Vec<LocalTrack> = self
+            .all_tracks
+            .iter()
+            .filter(|t| {
+                (words.is_empty() || Self::matches_filter(t, &words))
+                    && (!favorites_only || self.favorites.contains(&t.path))
+            })
+            .cloned()
+            .collect();
+        self.tracks = tracks;
         let find = |path: &Option<PathBuf>, tracks: &[LocalTrack]| {
             path.as_ref()
                 .and_then(|p| tracks.iter().position(|t| &t.path == p))
@@ -1931,6 +1951,8 @@ impl App {
             Action::Visual => self.toggle_visual(),
             Action::Command => self.cmdline = Some(String::new()),
             Action::Stats => self.toggle_stats(),
+            Action::Favorite => self.toggle_favorite(),
+            Action::Favorites => self.set_only_favorites(!self.only_favorites),
             _ => {}
         }
     }
@@ -2013,28 +2035,192 @@ impl App {
     }
 
     fn cmdline_key(&mut self, key: KeyEvent) {
-        let Some(input) = self.cmdline.as_mut() else {
+        let Some(mut input) = self.cmdline.take() else {
             return;
         };
+        if key.code != KeyCode::Tab {
+            self.cmd_cycle = None;
+        }
         match key.code {
-            KeyCode::Esc => self.cmdline = None,
+            KeyCode::Esc => {
+                self.cmd_pos = None;
+                return;
+            }
             KeyCode::Enter => {
-                let line = self.cmdline.take().unwrap_or_default();
-                self.run_command(&line);
+                self.cmd_pos = None;
+                if !input.trim().is_empty() && self.cmd_history.last() != Some(&input) {
+                    self.cmd_history.push(input.clone());
+                    if self.cmd_history.len() > 50 {
+                        self.cmd_history.remove(0);
+                    }
+                }
+                self.run_command(&input);
+                return;
             }
             KeyCode::Backspace => {
                 if input.pop().is_none() {
-                    self.cmdline = None;
+                    return;
+                }
+                self.cmd_pos = None;
+            }
+            KeyCode::Tab => self.complete_command(&mut input),
+            KeyCode::Up if !self.cmd_history.is_empty() => {
+                let pos = match self.cmd_pos {
+                    None => {
+                        self.cmd_draft = input.clone();
+                        self.cmd_history.len() - 1
+                    }
+                    Some(pos) => pos.saturating_sub(1),
+                };
+                self.cmd_pos = Some(pos);
+                input = self.cmd_history[pos].clone();
+            }
+            KeyCode::Down => {
+                if let Some(pos) = self.cmd_pos {
+                    if pos + 1 < self.cmd_history.len() {
+                        self.cmd_pos = Some(pos + 1);
+                        input = self.cmd_history[pos + 1].clone();
+                    } else {
+                        self.cmd_pos = None;
+                        input = std::mem::take(&mut self.cmd_draft);
+                    }
                 }
             }
-            KeyCode::Tab => {
-                if let Some(done) = commands::complete(input) {
-                    *input = done;
-                }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                input.push(c);
+                self.cmd_pos = None;
             }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => input.push(c),
             _ => {}
         }
+        self.cmdline = Some(input);
+    }
+
+    fn theme_names(&self) -> Vec<String> {
+        self.themes.iter().map(|t| t.name.clone()).collect()
+    }
+
+    fn complete_command(&mut self, input: &mut String) {
+        if let Some(cycle) = self.cmd_cycle.as_mut()
+            && cycle.list.len() > 1
+            && *input == format!("{}{}", cycle.base, cycle.list[cycle.index])
+        {
+            cycle.index = (cycle.index + 1) % cycle.list.len();
+            *input = format!("{}{}", cycle.base, cycle.list[cycle.index]);
+            return;
+        }
+        let (base, list) = commands::candidates(input, &self.theme_names());
+        match list.len() {
+            0 => {}
+            1 => *input = format!("{base}{} ", list[0]),
+            _ => {
+                let common = commands::common_prefix(&list);
+                if common.len() > input.len() - base.len() {
+                    *input = format!("{base}{common}");
+                } else {
+                    *input = format!("{base}{}", list[0]);
+                    self.cmd_cycle = Some(CmdCycle {
+                        base,
+                        list,
+                        index: 0,
+                    });
+                }
+            }
+        }
+    }
+
+    pub fn cmd_hints(&self) -> (Vec<String>, Option<usize>) {
+        let Some(input) = self.cmdline.as_ref() else {
+            return (Vec::new(), None);
+        };
+        if input.trim().is_empty() {
+            return (Vec::new(), None);
+        }
+        if let Some(cycle) = &self.cmd_cycle
+            && input.starts_with(&cycle.base)
+        {
+            return (cycle.list.clone(), Some(cycle.index));
+        }
+        let (_, list) = commands::candidates(input, &self.theme_names());
+        if list.len() == 1 && input.ends_with(list[0].as_str()) {
+            return (Vec::new(), None);
+        }
+        (list, None)
+    }
+
+    fn find_track(&self, words: &[String]) -> Option<usize> {
+        let words: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
+        self.tracks
+            .iter()
+            .position(|t| Self::matches_filter(t, &words))
+    }
+
+    fn set_only_favorites(&mut self, on: bool) {
+        self.only_favorites = on;
+        self.tab = Tab::Library;
+        self.rebuild_view();
+        self.set_status(
+            if on {
+                format!("Showing {} favorites", self.tracks.len())
+            } else {
+                "Showing all tracks".to_string()
+            },
+            false,
+        );
+    }
+
+    fn toggle_favorite(&mut self) {
+        let paths: Vec<PathBuf> = if self.tab == Tab::Library {
+            if self.marked.is_empty() {
+                self.library_state
+                    .selected()
+                    .and_then(|i| self.tracks.get(i))
+                    .map(|t| t.path.clone())
+                    .into_iter()
+                    .collect()
+            } else {
+                self.tracks
+                    .iter()
+                    .filter(|t| self.marked.contains(&t.path))
+                    .map(|t| t.path.clone())
+                    .collect()
+            }
+        } else if matches!(
+            self.active,
+            Active::Local(_) | Active::Queue(_) | Active::Extra
+        ) {
+            self.current_path.clone().into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        if paths.is_empty() {
+            self.set_status("Select or play a local track first", true);
+            return;
+        }
+        let remove = paths.iter().all(|p| self.favorites.contains(p));
+        for path in &paths {
+            if remove {
+                self.favorites.remove(path);
+            } else {
+                self.favorites.insert(path.clone());
+            }
+        }
+        if self.tab == Tab::Library {
+            self.marked.clear();
+        }
+        let count = paths.len();
+        let noun = if count == 1 { "track" } else { "tracks" };
+        self.set_status(
+            if remove {
+                format!("Removed {count} {noun} from favorites")
+            } else {
+                format!("Added {count} {noun} to favorites")
+            },
+            false,
+        );
+        if remove && self.only_favorites {
+            self.rebuild_view();
+        }
+        state::save(&self.snapshot_state());
     }
 
     fn run_command(&mut self, line: &str) {
@@ -2143,11 +2329,85 @@ impl App {
                     None => self.set_status("Usage: tab library|playlists|radio|spotify", true),
                 }
             }
+            "play" if !args.is_empty() => match self.find_track(&args) {
+                Some(index) => {
+                    self.tab = Tab::Library;
+                    self.library_state.select(Some(index));
+                    self.play_local(index);
+                }
+                None => self.set_status("No track matches", true),
+            },
             "play" => {
                 if !self.is_playing() {
                     self.toggle_pause();
                 }
             }
+            "goto" => match self.find_track(&args) {
+                Some(index) if !args.is_empty() => {
+                    self.tab = Tab::Library;
+                    self.library_state.select(Some(index));
+                }
+                _ => self.set_status("Usage: goto <text> (no track matches)", true),
+            },
+            "find" => {
+                self.tab = Tab::Library;
+                self.filter = args.join(" ");
+                self.rebuild_view();
+                let text = if self.filter.is_empty() {
+                    "Filter cleared".to_string()
+                } else {
+                    format!("{} matches", self.tracks.len())
+                };
+                self.set_status(text, false);
+            }
+            "add" => {
+                let words: Vec<String> = args.iter().map(|w| w.to_lowercase()).collect();
+                if words.is_empty() {
+                    self.set_status("Usage: add <text>", true);
+                } else {
+                    let found: Vec<LocalTrack> = self
+                        .all_tracks
+                        .iter()
+                        .filter(|t| Self::matches_filter(t, &words))
+                        .cloned()
+                        .collect();
+                    if found.is_empty() {
+                        self.set_status("No track matches", true);
+                    } else {
+                        let count = found.len();
+                        self.up_next.extend(found);
+                        self.set_status(
+                            format!("Queued {count} ({} up next)", self.up_next.len()),
+                            false,
+                        );
+                    }
+                }
+            }
+            "mute" => self.toggle_mute(),
+            "fade" => match arg {
+                None => {
+                    let secs = self.config.audio.crossfade;
+                    self.set_status(format!("Crossfade {secs} s"), false);
+                }
+                Some("off") => {
+                    self.config.audio.crossfade = 0.0;
+                    self.set_status("Crossfade off", false);
+                }
+                Some(text) => match text.trim_end_matches('s').parse::<f32>() {
+                    Ok(secs) if (0.0..=12.0).contains(&secs) => {
+                        self.config.audio.crossfade = secs;
+                        self.set_status(format!("Crossfade {secs} s"), false);
+                    }
+                    _ => self.set_status("Usage: fade 0-12|off", true),
+                },
+            },
+            "fav" => self.toggle_favorite(),
+            "favs" => match arg {
+                Some("on") => self.set_only_favorites(true),
+                Some("off") => self.set_only_favorites(false),
+                None => self.set_only_favorites(!self.only_favorites),
+                Some(_) => self.set_status("Usage: favs on|off", true),
+            },
             "pause" => {
                 if self.is_playing() {
                     self.toggle_pause();
@@ -3249,6 +3509,7 @@ impl App {
             },
             track,
             position_secs,
+            favorites: self.favorites.iter().cloned().collect(),
         }
     }
 
