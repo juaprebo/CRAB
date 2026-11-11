@@ -8,7 +8,16 @@ A terminal audio player written in Rust. It plays local files, internet radio an
 
 ## Features
 
-- Local library with automatic reload when files are added or removed, and a built-in folder browser
+- Local library with automatic reload when files are added or removed, a built-in folder browser, tag reading (title, artist, album, track number), sorting and a live filter
+- Embedded cover art (or `cover.jpg` and similar next to the files) drawn in the player as colored half blocks
+- Repeat modes, a play queue ("up next"), a sleep timer and a key help overlay (`?`)
+- Gapless playback, optional crossfade, a ten band equalizer with presets and ReplayGain
+- Synced (`.lrc`) and plain lyrics, shown in an overlay
+- Scrobbling to ListenBrainz
+- Media keys and desktop media controls (MPRIS) on Linux
+- Playback state (shuffle, repeat, volume, last track and position) restored on the next start
+- Mouse support: click rows and tabs, double click to play, click the progress bar to seek, scroll wheel
+- Playlists that mix tracks from any folder, including files that are not in your library
 - Internet radio with live track titles (ICY metadata) and automatic reconnection
 - Spotify through Spotify Connect (optional, see the notice below)
 - Six live visualizers (bars, mirror, line, dots, waveform and spectrogram), switchable with a key
@@ -41,6 +50,7 @@ Spotify support is a Cargo feature that is on by default. Pass `SPOTIFY=0` to `m
 
     crab [PATH...]   start the player scanning the given folders or files
     crab login       sign in to Spotify (Premium account required)
+    crab --version
     crab --help
 
 Without arguments CRAB opens the folders you used last time, or `~/Music` the first time.
@@ -55,19 +65,81 @@ Without arguments CRAB opens the folders you used last time, or `~/Music` the fi
 | `+` / `-` | volume |
 | `m` | mute |
 | `s` | shuffle |
+| `R` | repeat: off, all, one |
+| `Q` | add the marked tracks, the selected track or the open playlist to the queue |
+| `Z` | show the queue (Enter plays now, `x` removes, `X` clears) |
+| `S` | sort the library by path, title, artist or album |
+| `z` | sleep timer: 15, 30, 60 and 90 minutes, then off |
+| `y` | next equalizer preset |
+| `L` | lyrics of the current track |
+| `i` / `E` | import / export an `.m3u` playlist (Playlists tab) |
+| `?` | key help |
 | `o` | choose a music folder |
+| `a` / `A` | mark a track / mark all (Library); create a playlist or add files to one (Playlists) |
+| `d` / `D` | mark a track of an open playlist / mark all |
+| `w` | save the marked tracks to a playlist (Library) |
 | `v` | next visualizer |
-| `/` | find radio stations (Radio tab) |
-| `x` | remove the selected station, press twice (Radio tab) |
+| `c` | show or hide the clock in the header |
+| `/` | find radio stations (Radio tab); filter the library as you type in the Library tab (Esc clears, Enter keeps) |
+| `x` | remove the selected station, playlist or playlist track, press twice |
 | `t` | open the theme picker |
 | `r` | reload the configuration |
-| Tab, `1` `2` `3` | switch between Library, Radio and Spotify |
+| Tab, `1` `2` `3` `4` | switch between Library, Playlists, Radio and Spotify |
 | `q` | quit |
 | Esc | cancel what is in progress (a station that is connecting, a dialog); it never quits |
+
+### Playback
+
+Tags are read with lofty. Cover art comes from the file itself or from `cover`, `folder`, `front`, `album` or `albumart` (`.jpg` or `.png`) in the same folder.
+
+    [library]
+    sort = "path"        # path, title, artist or album
+
+    [audio]
+    replaygain = true    # apply the ReplayGain track gain tag when present
+    gapless = true       # start the next track without a gap
+    crossfade = 0.0      # seconds; above 0 it replaces gapless
+    eq = "flat"          # flat, bass, treble, vocal, rock, electronic, loudness
+    # eq_bands = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]   # dB at 31 Hz ... 16 kHz, overrides eq
+
+`y` cycles the equalizer presets and saves the choice. A track is crossfaded only when it is longer than three times the fade.
+
+Lyrics are read from a `.lrc` or `.txt` file with the same name as the track, or from the lyrics tag. With a synced file the current line follows the song.
+
+The last state (shuffle, repeat, volume, track and position) is stored in `~/.local/state/crab/state.toml`.
+
+### Scrobbling
+
+CRAB can send listens to [ListenBrainz](https://listenbrainz.org). Put your user token (from your ListenBrainz profile) in `config.toml`, or in the `CRAB_LISTENBRAINZ_TOKEN` environment variable:
+
+    [scrobble]
+    listenbrainz_token = ""
+
+The playing track is announced as "now playing", and it is scrobbled after half of it (or four minutes) has been played. Tracks shorter than 30 seconds are not scrobbled.
+
+### Media keys
+
+On Linux CRAB registers as an MPRIS player, so media keys, desktop widgets and `playerctl` work. The cover is shown there too. This part is not available on macOS or Windows yet.
+
+### Mouse
+
+Click a row to select it and double click to play it. Click a tab to switch, click the progress bar to seek (local files), scroll to move the selection. Set `mouse = false` in `config.toml` to turn it off.
 
 ### Folder browser
 
 Press `o` to browse folders without leaving CRAB. Enter opens a folder, Backspace goes up, Space makes the current folder your library, `a` adds it to the library, `/` lets you type a path, `~` jumps to your home folder and `.` shows hidden folders. The chosen folders are remembered for the next start. Folders given on the command line take priority.
+
+### Playlists
+
+The Playlists tab (`2`) holds your playlists. They are not tied to the library folders, so one list can mix tracks from anywhere on disk.
+
+To create a list from files that are not in your library, open the Playlists tab and press `a`, type a name, then browse to the files. In the browser Enter opens a folder or adds the highlighted file, Space marks files or folders (a `+` appears, and marks are kept while you move between folders), `a` adds everything marked, `A` adds every audio file in the current folder, and Esc finishes. A marked folder is searched recursively. Press `a` inside an open playlist to add more later.
+
+To build one from tracks you already see in the Library tab, press `a` on each track to mark it (a `+` appears) or `A` to mark all of them (again to clear), then `w` and type a name. Typing the name of an existing list adds to it, and Up and Down cycle through the lists you have. Without marks, `w` saves the selected track.
+
+Inside an open playlist, `d` marks tracks and `D` marks all of them, and `x` twice removes the marked tracks (or the selected one when nothing is marked).
+
+On the list of playlists, Enter plays the selected playlist from its first track, continuing through the list (shuffle applies to what comes next), and `e` opens it to see and edit its tracks. Inside an open playlist, Enter plays from the selected track. Esc or Backspace goes back to the list of playlists, and `x` twice deletes the selected playlist. Missing files are shown in the error color and skipped. Playlists are saved in `~/.config/crab/playlists.toml`.
 
 ### Visualizers
 
@@ -83,6 +155,17 @@ Press `v` to cycle through the visualizers. The one you leave selected is saved 
 | `waterfall` | a spectrogram: the spectrum scrolling down over time |
 
 `bar_width` and `gap` apply to `bars` and `mirror`, and `peaks` to `bars`.
+
+### Clock
+
+Press `c` to show or hide a clock in the header, next to the theme name. It is shown in the accent color, and it is left out when the window is too narrow to fit it beside the tabs. Whether it is shown is remembered between runs.
+
+    [clock]
+    show = false
+    hour12 = false
+    seconds = true
+
+`hour12 = true` switches to a 12 hour clock with an AM or PM label. With `seconds = false` the clock shows only hours and minutes and the colon blinks every second.
 
 ## Radio
 
@@ -150,6 +233,7 @@ A crab is drawn behind the lists and scales with the terminal size. `art_strengt
 | --- | --- |
 | `~/.config/crab/config.toml` | themes and display options |
 | `~/.config/crab/stations.toml` | radio stations |
+| `~/.config/crab/playlists.toml` | playlists |
 | `~/.local/state/crab/library_roots.txt` | folders remembered from the folder browser |
 | `~/.cache/crab/crab.log` | error log |
 | `~/.cache/crab/spotify/` | saved Spotify credentials |
