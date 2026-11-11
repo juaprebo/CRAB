@@ -16,6 +16,7 @@ A terminal audio player written in Rust. It plays local files, internet radio an
 - Scrobbling to ListenBrainz
 - Media keys and desktop media controls (MPRIS) on Linux
 - Playback state (shuffle, repeat, volume, last track and position) restored on the next start
+- A `vim` key preset, a `:` command line, keys you can remap and a CPU and memory readout
 - Mouse support: click rows and tabs, double click to play, click the progress bar to seek, scroll wheel
 - Playlists that mix tracks from any folder, including files that are not in your library
 - Internet radio with live track titles (ICY metadata) and automatic reconnection
@@ -48,6 +49,8 @@ Spotify support is a Cargo feature that is on by default. Pass `SPOTIFY=0` to `m
 
 ## Usage
 
+![Keys help overlay](docs/help.png)
+
     crab [PATH...]   start the player scanning the given folders or files
     crab login       sign in to Spotify (Premium account required)
     crab --version
@@ -74,6 +77,9 @@ Without arguments CRAB opens the folders you used last time, or `~/Music` the fi
 | `L` | lyrics of the current track |
 | `i` / `E` | import / export an `.m3u` playlist (Playlists tab) |
 | `?` | key help |
+| `:` | command line |
+| `I` | show or hide CPU and memory use |
+| `>` / `<` | next / previous track |
 | `o` | choose a music folder |
 | `a` / `A` | mark a track / mark all (Library); create a playlist or add files to one (Playlists) |
 | `d` / `D` | mark a track of an open playlist / mark all |
@@ -89,6 +95,8 @@ Without arguments CRAB opens the folders you used last time, or `~/Music` the fi
 | Esc | cancel what is in progress (a station that is connecting, a dialog); it never quits |
 
 ### Playback
+
+![Synced lyrics next to the library](docs/lyrics.png)
 
 Tags are read with lofty. Cover art comes from the file itself or from `cover`, `folder`, `front`, `album` or `albumart` (`.jpg` or `.png`) in the same folder.
 
@@ -124,6 +132,65 @@ On Linux CRAB registers as an MPRIS player, so media keys, desktop widgets and `
 ### Mouse
 
 Click a row to select it and double click to play it. Click a tab to switch, click the progress bar to seek (local files), scroll to move the selection. Set `mouse = false` in `config.toml` to turn it off.
+
+### Key presets
+
+![Visual selection with the resource badge](docs/visual.png)
+
+CRAB has three key presets, chosen with `:keys crab`, `:keys vim` or `:keys custom` (or `preset` in `config.toml`).
+
+| Preset | Keys |
+| --- | --- |
+| `crab` | The default. Arrows, Page Up/Down, Home and End to move, and the action keys listed above. |
+| `vim` | Everything in `crab`, plus `j` `k` `h` `l`, `gg` and `G`, Ctrl-d and Ctrl-u, `V` visual selection and counts. |
+| `custom` | A copy of `crab` or `vim` with your own changes. |
+
+`crab` and `vim` are never modified. Any change you make goes to `custom`, so switching back to `crab` or `vim` is always possible, and your custom keys are kept for later.
+
+In the `vim` preset a number typed before an action repeats it: `5j` moves five rows, `9n` skips nine tracks, `7G` goes to row 7. Counts start with a digit that is not a tab key (5 to 9) and can continue with any digit, so `15j` works. `V` starts a visual selection in the Library or in an open playlist: move with `j` and `k` and every track in the range is marked.
+
+### Commands
+
+![The command line](docs/commands.png)
+
+`:` opens a command line at the bottom, and Tab completes names. Rarely used actions are also available as commands:
+
+| Command | Does |
+| --- | --- |
+| `:sort album` | sort by path, title, artist or album |
+| `:sleep 30` / `:sleep off` | sleep timer in minutes |
+| `:eq rock` | equalizer preset |
+| `:repeat all` / `:shuffle on` | playback modes |
+| `:volume 60` | volume in percent |
+| `:seek 1:30`, `:seek +10` | seek to a time or by seconds |
+| `:theme name`, `:viz mirror` | switch theme or visualizer |
+| `:tab radio`, `:save`, `:import`, `:export` | jump and open dialogs |
+| `:keys vim`, `:map`, `:unmap`, `:reset` | key presets and remapping, see below |
+| `:stats` | CPU, memory and uptime of CRAB |
+| `:play`, `:pause`, `:next`, `:prev`, `:stop`, `:queue`, `:lyrics`, `:clock`, `:reload`, `:folder`, `:help`, `:quit` | the matching actions |
+
+### Remapping keys
+
+From inside CRAB, `:map sleep Z` binds an action and saves it. `:map sleep` shows its keys, `:unmap sleep` removes them, and `:reset sleep` goes back to the key of the preset it started from. The first change switches to the `custom` preset, based on the preset you were using.
+
+The same thing in `config.toml`:
+
+    [keys]
+    preset = "custom"
+    base = "vim"           # crab or vim: what custom starts from
+
+    [keys.custom]
+    sleep = "Z"
+    next = ["n", ">", "ctrl-n"]
+    lyrics = []            # no key
+
+A binding replaces the keys of that action and takes a key away from any other action that used it. A key is a single character, or one of `space`, `enter`, `esc`, `tab`, `backtab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `f1` to `f12`, optionally with the `ctrl-` prefix. The action names are the ones `:map` accepts: quit, cancel, back, search, repeat, queue, queue-view, help, mark, mark-all, sort, track-mark, track-mark-all, save, remove, open-list, import, export, sleep, eq, lyrics, visualizer, clock, folder, tab-next, tab-prev, tab-1 to tab-4, up, down, page-up, page-down, half-up, half-down, top, bottom, play, pause, next, prev, seek-forward, seek-back, volume-up, volume-down, mute, theme, reload, shuffle, visual, command and stats.
+
+The key help (`?`) and the footer always show the keys you have now.
+
+### Resource usage
+
+`I` shows or hides the CPU and memory used by CRAB next to the badges of the player (for example `cpu 3% · 41 MB`), and `:stats` prints the detail with the uptime. The CPU is a percentage of one core.
 
 ### Folder browser
 
