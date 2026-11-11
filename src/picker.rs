@@ -272,8 +272,7 @@ mod tests {
     }
 
     fn sandbox() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("crab-picker-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::testutil::temp_dir("picker");
         std::fs::create_dir_all(root.join("Beta/inner")).unwrap();
         std::fs::create_dir_all(root.join("alpha")).unwrap();
         std::fs::create_dir_all(root.join(".hidden")).unwrap();

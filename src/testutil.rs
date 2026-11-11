@@ -1,5 +1,19 @@
 use std::path::Path;
 
+pub fn temp_dir(label: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("crab-{label}-{}-{id}", std::process::id()));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return path.canonicalize().unwrap(),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("cannot create test directory: {error}"),
+        }
+    }
+}
+
 pub fn write_wav(path: &Path, seconds: u32) {
     let rate = 44_100u32;
     let frames = rate * seconds;

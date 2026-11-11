@@ -159,6 +159,19 @@ struct Pick {
     epoch: u64,
 }
 
+impl Pick {
+    fn resolve_active(&self, tracks: &[LocalTrack]) -> Active {
+        // A view may have been sorted, filtered or rescanned since preloading.
+        match self.active {
+            Active::Local(_) => tracks
+                .iter()
+                .position(|track| track.path == self.track.path)
+                .map_or(Active::Extra, Active::Local),
+            active => active,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
     SaveMarked,
@@ -293,7 +306,7 @@ fn playlist_state(playlists: &[Playlist]) -> ListState {
 
 impl App {
     pub fn new(mut engine: Engine, roots: Vec<PathBuf>) -> Self {
-        let (config, warning) = Config::load();
+        let (config, mut warning) = Config::load();
         engine.eq.set(&config.audio.eq_gains());
         let (key_map, key_warnings) = config.keymap();
         let themes = config.build_themes();
@@ -317,7 +330,17 @@ impl App {
             }
         };
         let (radio_tx, radio_rx) = channel();
-        let stations = radio::load_stations();
+        let stations = match radio::load_stations() {
+            Ok(stations) => stations,
+            Err(error) => {
+                let message = format!("{error:#}");
+                warning = Some(match warning {
+                    Some(previous) => format!("{previous}; {message}"),
+                    None => message,
+                });
+                Vec::new()
+            }
+        };
         let mut radio_state = ListState::default();
         if !stations.is_empty() {
             radio_state.select(Some(0));
@@ -1212,6 +1235,7 @@ impl App {
     }
 
     fn commit_pick(&mut self, pick: Pick) {
+        let active = pick.resolve_active(&self.tracks);
         if pick.pop {
             if self
                 .up_next
@@ -1222,15 +1246,18 @@ impl App {
             }
             self.resume = pick.resume;
         }
+        if active == Active::Extra && matches!(pick.active, Active::Local(_)) {
+            self.resume = None;
+        }
         let track = pick.track;
-        self.active = pick.active;
+        self.active = active;
         self.duration = pick.duration;
         self.title = track.title.clone();
         self.artist = track.artist_or_folder();
         self.album = track.album.clone();
         self.current_path = Some(track.path.clone());
         self.load_cover(&track.path);
-        match pick.active {
+        match active {
             Active::Local(index) => self.library_state.select(Some(index)),
             Active::Queue(index) => {
                 if let Some(open) = self.open_playlist
@@ -3630,5 +3657,59 @@ impl App {
         if let Some(handle) = &self.spotify {
             handle.send(SpotifyCommand::Shutdown);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local_pick() -> Pick {
+        Pick {
+            track: library::to_track(PathBuf::from("/music/b.wav")),
+            active: Active::Local(1),
+            pop: false,
+            resume: None,
+            duration: None,
+            epoch: 0,
+        }
+    }
+
+    fn tracks(names: &[&str]) -> Vec<LocalTrack> {
+        names
+            .iter()
+            .map(|name| library::to_track(PathBuf::from(format!("/music/{name}.wav"))))
+            .collect()
+    }
+
+    #[test]
+    fn preloaded_track_follows_reordered_library() {
+        let pick = local_pick();
+        let reordered = tracks(&["b", "c", "a"]);
+        assert!(pick.resolve_active(&reordered) == Active::Local(0));
+    }
+
+    #[test]
+    fn preloaded_track_follows_filtered_library() {
+        let pick = local_pick();
+        assert!(pick.resolve_active(&tracks(&["b"])) == Active::Local(0));
+        assert!(pick.resolve_active(&tracks(&["a", "c"])) == Active::Extra);
+        assert!(pick.resolve_active(&[]) == Active::Extra);
+    }
+
+    #[test]
+    fn preloaded_track_follows_rescanned_library() {
+        let pick = local_pick();
+        assert!(pick.resolve_active(&tracks(&["new", "a", "b", "c"])) == Active::Local(2));
+    }
+
+    #[test]
+    fn library_changes_preserve_playlist_and_up_next_origins() {
+        let mut pick = local_pick();
+        // Playlists can contain the same path more than once: keep their index.
+        pick.active = Active::Queue(2);
+        assert!(pick.resolve_active(&tracks(&["b"])) == Active::Queue(2));
+        pick.active = Active::Extra;
+        assert!(pick.resolve_active(&tracks(&["b"])) == Active::Extra);
     }
 }
