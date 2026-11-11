@@ -14,16 +14,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config ffmpeg
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Test desktop installer
+        run: make test-installer
       - name: Check formatting
         run: cargo fmt --check
       - name: Build
         run: cargo build --locked
       - name: Test
         run: cargo test --locked
+      - name: Test extended audio formats
+        run: cargo test --locked ffmpeg::tests::decodes_and_seeks_real_formats -- --ignored
       - name: Build without Spotify support
         run: cargo build --locked --no-default-features

@@ -41,6 +41,10 @@ Then build and install it to `~/.local/bin`:
     make
     make install
 
+On Linux, an interactive `make install` asks whether to register CRAB for double-click opening. The default is No. If you accept, choose individual types such as `mp3`, a combination such as `mp3,flac`, or `all`. The default selection is MP3 only: WAV and all other unselected types keep their current default applications. The launcher uses Kitty when available or the desktop default terminal otherwise. Files opened from the desktop start playing automatically.
+
+For unattended installs, use `make install ASSOCIATE=yes AUDIO_TYPES=mp3` to associate only MP3, `AUDIO_TYPES=mp3,flac` for a combination, or `AUDIO_TYPES=all` for every currently available audio type. Use `ASSOCIATE=no` to skip associations. Without a terminal, `ASSOCIATE=ask` skips the question. `make desktop AUDIO_TYPES=mp3` enables integration later. Root and staged `DESTDIR` installs never change desktop defaults. Desktop integration requires `xdg-mime` from `xdg-utils`.
+
 Or only build it and run it from the repository:
 
     make
@@ -54,10 +58,11 @@ Spotify support is a Cargo feature that is on by default. Pass `SPOTIFY=0` to `m
 
     crab [PATH...]   start the player scanning the given folders or files
     crab login       sign in to Spotify (Premium account required)
+    crab --formats  list available audio formats
     crab --version
     crab --help
 
-Without arguments CRAB opens the folders you used last time, or `~/Music` the first time.
+Without arguments CRAB opens the folders you used last time, or `~/Music` the first time. Passing an audio file, including by double-clicking it in the file manager, starts that file automatically from the beginning after scanning. Passing only folders does not start playback.
 
 | Key | Action |
 | --- | --- |
@@ -92,11 +97,28 @@ Without arguments CRAB opens the folders you used last time, or `~/Music` the fi
 | `c` | show or hide the clock in the header |
 | `/` | find radio stations (Radio tab); filter the library as you type in the Library tab (Esc clears, Enter keeps) |
 | `x` | remove the selected station, playlist or playlist track, press twice |
+| `F2` | rename the selected or open playlist |
 | `t` | open the theme picker |
 | `r` | reload the configuration |
 | Tab, `1` `2` `3` `4` | switch between Library, Playlists, Radio and Spotify |
 | `q` | quit |
 | Esc | cancel what is in progress (a station that is connecting, a dialog); it never quits |
+
+### Audio formats
+
+CRAB has a native Rust decoder. Native support includes MP3, MP1/MP2, FLAC, OGG/Vorbis, WAV/PCM, AIFF/PCM and AAC-LC (including AAC in M4A/MP4). A container extension alone does not guarantee support for every codec it can contain.
+
+If FFmpeg is installed, CRAB uses it for additional formats and as a fallback when native decoding fails. This adds codecs such as ALAC, Opus, WMA and WavPack, and formats including APE, CAF, Matroska/WebM audio, TTA, AC-3/E-AC-3, DTS, DSD, AMR, AU/SND and Musepack. The exact codecs available depend on the installed FFmpeg build. Audio is decoded as a stream; an entire track is never loaded into memory. FFmpeg is optional, and native playback still works without it. FFprobe supplies duration and metadata for formats that the native tag reader cannot read; playback works without FFprobe, with less metadata.
+
+Run `crab --formats` to see format groups and backend availability. The scanner and installer share `scripts/audio-formats.tsv`. Associations affect only the selected audio MIME types; support for a format does not make CRAB its default application. Video MIME types are never associated automatically.
+
+To test actual native and FFmpeg decoding, install FFmpeg and run:
+
+    cargo test --locked ffmpeg::tests::decodes_and_seeks_real_formats -- --ignored
+
+### Compact windows
+
+CRAB automatically switches to a compact layout below 80 columns or 24 rows. The library gets priority: the spectrum, cover panel, decorative background, clock and theme label are hidden. Short tab labels and a two-line player keep the track, position and volume visible, with a reduced key footer. In extremely short windows only the current track line remains beneath the list. Resize back to at least 80 by 24 to restore the full layout; playback and key bindings are unchanged, including `Z` for the queue.
 
 ### Browsing artists and albums
 
@@ -176,6 +198,7 @@ In the `vim` preset a number typed before an action repeats it: `5j` moves five 
 | Command | Does |
 | --- | --- |
 | `:sort album` | sort by path, title, artist or album |
+| `:rename New name` | rename the selected or open playlist (`:rename` opens the dialog) |
 | `:view albums` | browse songs, artists or albums |
 | `:sleep 30` / `:sleep off` | sleep timer in minutes |
 | `:eq rock` | equalizer preset |
@@ -209,7 +232,7 @@ The same thing in `config.toml`:
     next = ["n", ">", "ctrl-n"]
     lyrics = []            # no key
 
-A binding replaces the keys of that action and takes a key away from any other action that used it. A key is a single character, or one of `space`, `enter`, `esc`, `tab`, `backtab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `f1` to `f12`, optionally with the `ctrl-` prefix. The action names are the ones `:map` accepts: quit, cancel, back, search, repeat, queue, queue-view, help, mark, mark-all, sort, library-view, play-group, track-mark, track-mark-all, save, remove, open-list, import, export, sleep, eq, lyrics, visualizer, clock, folder, tab-next, tab-prev, tab-1 to tab-4, up, down, page-up, page-down, half-up, half-down, top, bottom, play, pause, next, prev, seek-forward, seek-back, volume-up, volume-down, mute, theme, reload, shuffle, visual, command, stats, favorite and favorites.
+A binding replaces the keys of that action and takes a key away from any other action that used it. A key is a single character, or one of `space`, `enter`, `esc`, `tab`, `backtab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `f1` to `f12`, optionally with the `ctrl-` prefix. The action names are the ones `:map` accepts: quit, cancel, back, search, repeat, queue, queue-view, help, mark, mark-all, sort, library-view, play-group, track-mark, track-mark-all, save, remove, open-list, rename, import, export, sleep, eq, lyrics, visualizer, clock, folder, tab-next, tab-prev, tab-1 to tab-4, up, down, page-up, page-down, half-up, half-down, top, bottom, play, pause, next, prev, seek-forward, seek-back, volume-up, volume-down, mute, theme, reload, shuffle, visual, command, stats, favorite and favorites.
 
 The key help (`?`) and the footer always show the keys you have now.
 
@@ -228,6 +251,8 @@ The Playlists tab (`2`) holds your playlists. They are not tied to the library f
 To create a list from files that are not in your library, open the Playlists tab and press `a`, type a name, then browse to the files. In the browser Enter opens a folder or adds the highlighted file, Space marks files or folders (a `+` appears, and marks are kept while you move between folders), `a` adds everything marked, `A` adds every audio file in the current folder, and Esc finishes. A marked folder is searched recursively. Press `a` inside an open playlist to add more later.
 
 To build one from tracks you already see in the Library tab, press `a` on each track to mark it (a `+` appears) or `A` to mark all of them (again to clear), then `w` and type a name. Typing the name of an existing list adds to it, and Up and Down cycle through the lists you have. Without marks, `w` saves the selected track.
+
+Press `F2` on a playlist or inside one to rename it. The dialog starts with its current name; Ctrl-u clears it. Empty names and names already used by another playlist are rejected. Renaming preserves the tracks and current playback.
 
 Inside an open playlist, `d` marks tracks and `D` marks all of them, and `x` twice removes the marked tracks (or the selected one when nothing is marked).
 

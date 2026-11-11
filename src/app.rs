@@ -179,6 +179,7 @@ pub enum PromptKind {
     NewList,
     ImportM3u,
     ExportM3u(usize),
+    Rename(usize),
 }
 
 #[derive(Default)]
@@ -217,6 +218,7 @@ pub struct App {
     sleep_at: Option<Instant>,
     restore: Option<(PathBuf, Duration)>,
     restore_shown: bool,
+    startup_track: Option<PathBuf>,
     current_path: Option<PathBuf>,
     saved_at: Instant,
     pub scanning: bool,
@@ -395,6 +397,7 @@ impl App {
                 .clone()
                 .map(|p| (p, Duration::from_secs(saved.position_secs))),
             restore_shown: false,
+            startup_track: None,
             current_path: None,
             saved_at: Instant::now(),
             scanning: true,
@@ -845,6 +848,12 @@ impl App {
         track
     }
 
+    pub fn request_autoplay(&mut self, path: PathBuf) {
+        self.startup_track = Some(path);
+        self.restore = None;
+        self.restore_shown = true;
+    }
+
     fn apply_tracks(&mut self, scan: Scan) {
         self.meta = scan
             .tracks
@@ -871,6 +880,16 @@ impl App {
             self.restore_shown = true;
             if let Some(index) = self.tracks.iter().position(|t| &t.path == path) {
                 self.library_state.select(Some(index));
+            }
+        }
+        if let Some(path) = self.startup_track.take() {
+            if let Some(index) = self.tracks.iter().position(|track| track.path == path) {
+                self.play_local(index);
+            } else {
+                self.set_status(
+                    format!("Cannot find requested audio file: {}", path.display()),
+                    true,
+                );
             }
         }
     }
@@ -2143,6 +2162,7 @@ impl App {
                 }
             }
             Action::OpenList if self.in_playlists() => self.open_selected_playlist(),
+            Action::Rename if self.in_playlists() => self.rename_selected_playlist(),
             Action::Import if self.in_playlists() => self.open_import_prompt(),
             Action::Export if self.in_playlists() => self.open_export_prompt(),
             Action::Sleep => self.cycle_sleep(),
@@ -2673,6 +2693,17 @@ impl App {
                 None => self.set_status("Usage: seek 1:30 | +10 | -10", true),
             },
             "queue" => self.queue_add(),
+            "rename" if self.in_playlists() => {
+                if args.is_empty() {
+                    self.rename_selected_playlist();
+                } else if let Some(index) = self
+                    .open_playlist
+                    .or_else(|| self.playlist_state.selected())
+                {
+                    self.rename_playlist(index, &args.join(" "));
+                }
+            }
+            "rename" => self.set_status("Select a playlist in the Playlists tab first", true),
             "stats" => {
                 if self.stats.is_none() {
                     self.toggle_stats();
@@ -3115,13 +3146,17 @@ impl App {
     }
 
     fn queue_view_key(&mut self, key: KeyEvent) {
+        if self.keys.action(&key) == Some(Action::QueueView) {
+            self.queue_view = None;
+            return;
+        }
         let len = self.up_next.len();
         let Some(state) = self.queue_view.as_mut() else {
             return;
         };
         let current = state.selected().unwrap_or(0);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('Z') | KeyCode::Char('q') => self.queue_view = None,
+            KeyCode::Esc | KeyCode::Char('q') => self.queue_view = None,
             KeyCode::Up | KeyCode::Char('k') => state.select(Some(current.saturating_sub(1))),
             KeyCode::Down | KeyCode::Char('j') if len > 0 => {
                 state.select(Some((current + 1).min(len - 1)));
@@ -3355,6 +3390,9 @@ impl App {
                 };
                 prompt.input = self.playlists[next].name.clone();
             }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                prompt.input.clear()
+            }
             KeyCode::Char(c) => prompt.input.push(c),
             KeyCode::Enter => {
                 let name = prompt.input.trim().to_string();
@@ -3370,8 +3408,58 @@ impl App {
         }
     }
 
+    fn rename_selected_playlist(&mut self) {
+        let Some(index) = self
+            .open_playlist
+            .or_else(|| self.playlist_state.selected())
+        else {
+            return;
+        };
+        let Some(list) = self.playlists.get(index) else {
+            return;
+        };
+        self.name_prompt = Some(NamePrompt {
+            title: "Rename playlist",
+            label: "New name",
+            input: list.name.clone(),
+            paths: Vec::new(),
+            kind: PromptKind::Rename(index),
+        });
+    }
+
+    fn rename_playlist(&mut self, index: usize, name: &str) -> bool {
+        let mut updated = self.playlists.clone();
+        let previous = match playlist::rename(&mut updated, index, name) {
+            Ok(previous) => previous,
+            Err(error) => {
+                self.set_status(error.to_string(), true);
+                return false;
+            }
+        };
+        if let Err(error) = playlist::save(&updated) {
+            self.set_status(format!("Playlist could not be renamed: {error:#}"), true);
+            return false;
+        }
+        let name = updated[index].name.clone();
+        self.playlists = updated;
+        if self.queue_is_playlist && self.queue_name == previous {
+            self.queue_name = name.clone();
+        }
+        self.set_status(format!("Renamed playlist to {name}"), false);
+        true
+    }
+
     fn finish_prompt(&mut self, prompt: NamePrompt, name: String) {
         match prompt.kind {
+            PromptKind::Rename(index) => {
+                if !self.rename_playlist(index, &name) {
+                    self.name_prompt = Some(NamePrompt {
+                        input: name,
+                        ..prompt
+                    });
+                }
+                return;
+            }
             PromptKind::ImportM3u => return self.import_m3u(&name),
             PromptKind::ExportM3u(index) => return self.export_m3u(index, &name),
             _ => {}

@@ -7,8 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use walkdir::WalkDir;
 
-const EXTENSIONS: [&str; 8] = ["mp3", "flac", "ogg", "oga", "wav", "m4a", "aac", "mp4"];
-
 #[derive(Clone, Debug)]
 pub struct LocalTrack {
     pub path: PathBuf,
@@ -44,10 +42,8 @@ impl LocalTrack {
 }
 
 pub fn is_audio(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| EXTENSIONS.contains(&e.to_lowercase().as_str()))
-        .unwrap_or(false)
+    crate::formats::supports(path, false)
+        || (crate::formats::supports(path, true) && crate::ffmpeg::available())
 }
 
 pub fn to_track(path: PathBuf) -> LocalTrack {
@@ -123,17 +119,71 @@ pub fn read_track(path: PathBuf) -> LocalTrack {
         if let Some(tag) = file.primary_tag().or_else(|| file.first_tag()) {
             apply_tag(&mut track, tag);
         }
+    } else {
+        read_external_tags(&mut track);
     }
     track
 }
 
+fn read_external_tags(track: &mut LocalTrack) {
+    if !crate::ffmpeg::available() {
+        return;
+    }
+    let Some(metadata) = crate::ffmpeg::probe(&track.path) else {
+        return;
+    };
+    track.duration = crate::ffmpeg::duration(&metadata);
+    let Some(tags) = metadata
+        .get("format")
+        .and_then(|format| format.get("tags"))
+        .and_then(|tags| tags.as_object())
+    else {
+        return;
+    };
+    let value = |key: &str| {
+        tags.iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .and_then(|(_, value)| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    if let Some(title) = value("title") {
+        track.title = title.into();
+    }
+    if let Some(artist) = value("artist") {
+        track.artist = artist.into();
+    }
+    if let Some(album) = value("album") {
+        track.album = album.into();
+    }
+    if let Some(artist) = value("album_artist") {
+        track.album_artist = artist.into();
+    }
+    let number = |key| {
+        value(key)
+            .and_then(|text| text.split('/').next())
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(0)
+    };
+    track.track = number("track");
+    track.disc = number("disc");
+}
+
 pub fn read_cover(path: &Path) -> Option<Vec<u8>> {
-    let tagged = Probe::open(path).ok()?.read().ok()?;
-    let from_tag = tagged
-        .primary_tag()
-        .into_iter()
-        .chain(tagged.tags().iter())
-        .find_map(|tag| tag.pictures().first().map(|p| p.data().to_vec()));
+    let from_tag = Probe::open(path)
+        .ok()
+        .and_then(|probe| probe.read().ok())
+        .and_then(|tagged| {
+            tagged
+                .primary_tag()
+                .into_iter()
+                .chain(tagged.tags().iter())
+                .find_map(|tag| {
+                    tag.pictures()
+                        .first()
+                        .map(|picture| picture.data().to_vec())
+                })
+        });
     if from_tag.is_some() {
         return from_tag;
     }

@@ -21,6 +21,7 @@ pub enum Action {
     Save,
     Remove,
     OpenList,
+    Rename,
     Import,
     Export,
     Sleep,
@@ -99,6 +100,7 @@ pub const TABLE: &[(Action, &str, &[&str], &[&str])] = &[
     (Action::Save, "save", &["w"], &[]),
     (Action::Remove, "remove", &["x"], &[]),
     (Action::OpenList, "open-list", &["e"], &[]),
+    (Action::Rename, "rename", &["f2"], &[]),
     (Action::Import, "import", &["i"], &[]),
     (Action::Export, "export", &["E"], &[]),
     (Action::Sleep, "sleep", &["z"], &[]),
@@ -495,6 +497,21 @@ mod tests {
         assert_eq!(custom_crab.action(&press('j')), None);
         assert_eq!(Preset::from_name("VIM"), Some(Preset::Vim));
         assert_eq!(Preset::from_name("x"), None);
+    }
+
+    #[test]
+    fn queue_key_stays_z_and_rename_is_available() {
+        let press = |c| event(KeyCode::Char(c), KeyModifiers::NONE);
+        let (crab, _) = Keymap::build(Preset::Crab, Preset::Crab, &BTreeMap::new());
+        assert_eq!(crab.action(&press('V')), None);
+        assert_eq!(crab.action(&press('Z')), Some(Action::QueueView));
+        assert_eq!(
+            crab.action(&event(KeyCode::F(2), KeyModifiers::NONE)),
+            Some(Action::Rename)
+        );
+        let (vim, _) = Keymap::build(Preset::Vim, Preset::Vim, &BTreeMap::new());
+        assert_eq!(vim.action(&press('V')), Some(Action::Visual));
+        assert_eq!(vim.action(&press('Z')), Some(Action::QueueView));
     }
 
     #[test]

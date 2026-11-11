@@ -51,6 +51,27 @@ pub fn find(playlists: &[Playlist], name: &str) -> Option<usize> {
         .position(|p| p.name.eq_ignore_ascii_case(name.trim()))
 }
 
+pub fn rename(playlists: &mut [Playlist], index: usize, name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("Playlist name cannot be empty"));
+    }
+    if index >= playlists.len() {
+        return Err(anyhow!("Playlist no longer exists"));
+    }
+    if playlists
+        .iter()
+        .enumerate()
+        .any(|(i, list)| i != index && list.name.eq_ignore_ascii_case(name))
+    {
+        return Err(anyhow!("A playlist named {name} already exists"));
+    }
+    Ok(std::mem::replace(
+        &mut playlists[index].name,
+        name.to_string(),
+    ))
+}
+
 pub fn add_tracks(
     playlists: &mut Vec<Playlist>,
     name: &str,
@@ -163,5 +184,48 @@ mod tests {
         let text = "#EXTM3U\r\n\r\nrel/song.mp3\r\nhttp://radio.example/stream\r\n#comment\r\n/abs/x.ogg\r\n";
         let parsed = parse_m3u(text, std::path::Path::new("/lists"));
         assert_eq!(parsed, vec![p("/lists/rel/song.mp3"), p("/abs/x.ogg")]);
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    fn lists() -> Vec<Playlist> {
+        vec![
+            Playlist {
+                name: "First".into(),
+                tracks: vec!["/music/a.wav".into()],
+            },
+            Playlist {
+                name: "Second".into(),
+                tracks: vec![],
+            },
+        ]
+    }
+    #[test]
+    fn rename_keeps_tracks_and_round_trips_with_the_new_name() {
+        let mut lists = lists();
+        let tracks = lists[0].tracks.clone();
+        assert_eq!(rename(&mut lists, 0, "  New name  ").unwrap(), "First");
+        assert_eq!(lists[0].name, "New name");
+        assert_eq!(lists[0].tracks, tracks);
+        let text = toml::to_string(&PlaylistFile {
+            playlist: lists.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            toml::from_str::<PlaylistFile>(&text).unwrap().playlist,
+            lists
+        );
+        assert_eq!(rename(&mut lists, 0, "NEW NAME").unwrap(), "New name");
+    }
+    #[test]
+    fn invalid_names_and_duplicates_leave_playlists_unchanged() {
+        let mut lists = lists();
+        let original = lists.clone();
+        for (index, name) in [(0, " "), (0, "second"), (8, "New")] {
+            assert!(rename(&mut lists, index, name).is_err());
+            assert_eq!(lists, original);
+        }
     }
 }

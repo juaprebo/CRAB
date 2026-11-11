@@ -3,6 +3,8 @@ BINDIR ?= $(PREFIX)/bin
 DESTDIR ?=
 CARGO ?= cargo
 SPOTIFY ?= 1
+ASSOCIATE ?= ask
+AUDIO_TYPES ?=
 
 BIN := target/release/crab
 
@@ -12,19 +14,23 @@ else
 FEATURES :=
 endif
 
-.PHONY: all build deps install uninstall test clean help
+.PHONY: all build deps install desktop uninstall test test-installer clean help
 
 all: build
 
 help:
 	@echo "make                 build target/release/crab"
 	@echo "make install         install it to $(BINDIR) (builds first if needed)"
+	@echo "make desktop         register selected audio types (AUDIO_TYPES=mp3,flac or all)"
+	@echo "make test-installer  test desktop integration without changing your defaults"
 	@echo "make uninstall       remove the installed binary"
 	@echo "make test            run the test suite"
 	@echo "make clean           remove build output"
 	@echo ""
 	@echo "Options: SPOTIFY=0 leaves Spotify support out, PREFIX=/usr/local changes"
 	@echo "the install location, DESTDIR is honored for packaging."
+	@echo "ASSOCIATE=ask asks about audio defaults; yes enables them, no skips them."
+	@echo "AUDIO_TYPES=mp3,flac selects defaults; the default selection is mp3 only."
 
 deps:
 	@command -v $(CARGO) >/dev/null 2>&1 || { \
@@ -55,17 +61,21 @@ build: deps
 
 install:
 	@test -x $(BIN) || $(MAKE) build
-	install -d $(DESTDIR)$(BINDIR)
-	install -m 755 $(BIN) $(DESTDIR)$(BINDIR)/crab
+	install -d "$(DESTDIR)$(BINDIR)"
+	install -m 755 "$(BIN)" "$(DESTDIR)$(BINDIR)/crab"
 	@echo "Installed $(DESTDIR)$(BINDIR)/crab"
 	@case ":$$PATH:" in \
 		*":$(BINDIR):"*) ;; \
 		*) echo "Note: $(BINDIR) is not in your PATH. Add it to your shell profile to run 'crab' from anywhere." ;; \
 	esac
+	@sh scripts/install-desktop.sh "$(ASSOCIATE)" "$(BINDIR)/crab" "$(DESTDIR)" "$(AUDIO_TYPES)"
+
+desktop:
+	@sh scripts/install-desktop.sh yes "$(BINDIR)/crab" "$(DESTDIR)" "$(AUDIO_TYPES)"
 
 uninstall:
-	@if [ -e $(DESTDIR)$(BINDIR)/crab ]; then \
-		rm -f $(DESTDIR)$(BINDIR)/crab; \
+	@if [ -e "$(DESTDIR)$(BINDIR)/crab" ]; then \
+		rm -f "$(DESTDIR)$(BINDIR)/crab"; \
 		echo "Removed $(DESTDIR)$(BINDIR)/crab"; \
 	else \
 		echo "Nothing to remove at $(DESTDIR)$(BINDIR)/crab"; \
@@ -74,6 +84,9 @@ uninstall:
 
 test: deps
 	$(CARGO) test --locked $(FEATURES)
+
+test-installer:
+	python3 scripts/test-install-desktop.py
 
 clean:
 	$(CARGO) clean

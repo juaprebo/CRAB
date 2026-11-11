@@ -175,7 +175,7 @@ impl Source for SpotifySource {
     }
 }
 
-pub type Track = Tapped<Fx<Decoder<Input>>>;
+pub type Track = Tapped<Fx<Box<dyn Source + Send>>>;
 
 pub struct Engine {
     device: MixerDeviceSink,
@@ -267,6 +267,10 @@ impl Engine {
     ) -> Result<Track> {
         let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         let len = file.metadata()?.len();
+        if !crate::formats::supports(path, false) && crate::formats::supports(path, true) {
+            let decoder = Box::new(crate::ffmpeg::Decoder::open(path)?) as Box<dyn Source + Send>;
+            return Ok(Tapped::new(Fx::new(decoder, eq, gain), tap));
+        }
         let mut builder = Decoder::builder()
             .with_data(Input::File(BufReader::new(file)))
             .with_byte_len(len)
@@ -274,9 +278,15 @@ impl Engine {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             builder = builder.with_hint(ext);
         }
-        let decoder = builder
-            .build()
-            .map_err(|e| anyhow!("cannot decode {}: {e}", path.display()))?;
+        let decoder: Box<dyn Source + Send> = match builder.build() {
+            Ok(decoder) => Box::new(decoder),
+            Err(error) => Box::new(crate::ffmpeg::Decoder::open(path).with_context(|| {
+                format!(
+                    "cannot decode {} natively ({error}) or with FFmpeg",
+                    path.display()
+                )
+            })?),
+        };
         Ok(Tapped::new(Fx::new(decoder, eq, gain), tap))
     }
 
@@ -295,7 +305,10 @@ impl Engine {
         let decoder = builder
             .build()
             .map_err(|e| anyhow!("cannot decode stream: {e}"))?;
-        Ok(Tapped::new(Fx::new(decoder, eq, 1.0), tap))
+        Ok(Tapped::new(
+            Fx::new(Box::new(decoder) as Box<dyn Source + Send>, eq, 1.0),
+            tap,
+        ))
     }
 
     pub fn play(&mut self, track: Track) -> Option<Duration> {

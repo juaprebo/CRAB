@@ -8,7 +8,9 @@ mod cover;
 mod cover_display;
 mod engine;
 mod eq;
+mod ffmpeg;
 mod finder;
+mod formats;
 mod keys;
 mod library;
 mod library_browser;
@@ -17,6 +19,7 @@ mod media;
 mod picker;
 mod playlist;
 mod radio;
+mod responsive;
 mod scrobble;
 #[cfg(feature = "spotify")]
 mod spotify;
@@ -46,6 +49,7 @@ const HELP: &str = "CRAB - terminal audio player
 Usage:
   crab [PATH...]   Start the player, scanning the given folders or files (default: last used folders, or ~/Music)
   crab login       Sign in to Spotify (Premium account required)
+  crab --formats   List available audio formats and backends
   crab --version   Show the version
   crab --help      Show this help
 
@@ -114,6 +118,13 @@ fn run_loop(
     Ok(())
 }
 
+fn requested_track(roots: &[PathBuf]) -> Option<PathBuf> {
+    roots
+        .iter()
+        .find(|path| path.is_file() && library::is_audio(path))
+        .cloned()
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -123,6 +134,10 @@ fn main() -> Result<()> {
         }
         Some("--version") | Some("-V") => {
             println!("crab {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some("--formats") => {
+            formats::print();
             return Ok(());
         }
         Some("login") => {
@@ -135,6 +150,7 @@ fn main() -> Result<()> {
     }
 
     let mut roots: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
+    let autoplay = requested_track(&roots);
     if roots.is_empty() {
         roots = library::load_saved_roots();
     }
@@ -147,6 +163,9 @@ fn main() -> Result<()> {
     redirect_stderr();
     let engine = Engine::new()?;
     let mut app = App::new(engine, roots);
+    if let Some(path) = autoplay {
+        app.request_autoplay(path);
+    }
 
     let mut terminal = ratatui::init();
     let mouse = app.config.mouse;
@@ -160,4 +179,27 @@ fn main() -> Result<()> {
     ratatui::restore();
     app.shutdown();
     result
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    #[test]
+    fn only_explicit_audio_files_request_playback_in_argument_order() {
+        let dir = crate::testutil::temp_dir("cli-play");
+        let first = dir.join("z-first.wav");
+        let second = dir.join("a-second.wav");
+        crate::testutil::write_wav(&first, 1);
+        crate::testutil::write_wav(&second, 1);
+        let other = dir.join("image.png");
+        std::fs::write(&other, b"not audio").unwrap();
+        assert_eq!(requested_track(&[]), None);
+        assert_eq!(requested_track(&[dir.clone()]), None);
+        assert_eq!(requested_track(&[other.clone()]), None);
+        assert_eq!(
+            requested_track(&[other, first.clone(), second]),
+            Some(first)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

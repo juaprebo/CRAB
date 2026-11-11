@@ -115,20 +115,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             area,
         );
     }
-    let viz_height = (area.height / 3).clamp(7, 18);
-    let [header, body, viz, now, footer] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(4),
-        Constraint::Length(viz_height),
-        Constraint::Length(4),
-        Constraint::Length(1),
-    ])
-    .areas(area);
-
-    draw_header(frame, header, app, &theme);
-    app.hit.tabs = locate_tabs(frame.buffer_mut(), header);
+    let screen = crate::responsive::Screen::new(area);
+    let (header, body, viz, now, footer) = (
+        screen.header,
+        screen.body,
+        screen.viz,
+        screen.now,
+        screen.footer,
+    );
+    if screen.compact {
+        app.hit.tabs = draw_compact_header(frame, header, app.tab, &theme);
+    } else {
+        draw_header(frame, header, app, &theme);
+        app.hit.tabs = locate_tabs(frame.buffer_mut(), header);
+    }
     app.cover_area = None;
-    let body = if matches!(app.tab, Tab::Library | Tab::Playlists | Tab::Spotify) {
+    let body = if !screen.compact && matches!(app.tab, Tab::Library | Tab::Playlists | Tab::Spotify)
+    {
         let (content, image) = draw_cover_panel(
             frame,
             body,
@@ -149,12 +152,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Radio => draw_radio(frame, body, app, &theme),
         Tab::Spotify => draw_spotify(frame, body, app, &theme),
     }
-    if app.tab != Tab::Library || app.browser.is_songs() {
+    if !screen.compact && (app.tab != Tab::Library || app.browser.is_songs()) {
         draw_art(frame, body, app, &theme);
     }
-    draw_spectrum(frame, viz, app, &theme);
+    if viz.height > 0 {
+        draw_spectrum(frame, viz, app, &theme);
+    }
     draw_now_playing(frame, now, app, &theme);
-    draw_footer(frame, footer, app, &theme);
+    draw_footer(frame, footer, app, &theme, screen.compact);
     if let Some(picker) = app.picker.as_mut() {
         draw_picker(frame, area, picker, &theme);
     }
@@ -834,6 +839,67 @@ fn locate_tabs(buf: &Buffer, header: Rect) -> Vec<(Rect, Tab)> {
     found
 }
 
+fn draw_compact_header(
+    frame: &mut Frame,
+    area: Rect,
+    current: Tab,
+    theme: &Theme,
+) -> Vec<(Rect, Tab)> {
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    if area.width < 30 {
+        let text = fit_row_text(
+            &format!("{} {}", current.index() + 1, current.label()),
+            area.width as usize,
+        );
+        let width = Line::raw(text.as_str()).width() as u16;
+        frame.render_widget(
+            Paragraph::new(text).style(Style::default().fg(theme.accent)),
+            area,
+        );
+        return vec![(Rect::new(area.x, area.y, width, 1), current)];
+    }
+    let mut spans = Vec::new();
+    let mut hits = Vec::new();
+    let mut cursor = 0;
+    if area.width >= 40 {
+        spans.push(Span::styled(
+            "CRAB  ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        cursor = 6;
+    }
+    for (label, tab) in [
+        ("1 Lib", Tab::Library),
+        ("2 Lists", Tab::Playlists),
+        ("3 Radio", Tab::Radio),
+        ("4 Spot", Tab::Spotify),
+    ] {
+        if cursor >= area.width {
+            break;
+        }
+        let label = fit_row_text(label, (area.width - cursor) as usize);
+        let width = Line::raw(label.as_str()).width() as u16;
+        hits.push((Rect::new(area.x + cursor, area.y, width, 1), tab));
+        let style = Style::default().fg(if current == tab {
+            theme.accent
+        } else {
+            theme.dim
+        });
+        spans.push(Span::styled(label, style));
+        cursor += width;
+        if cursor < area.width {
+            spans.push(Span::raw(" "));
+            cursor += 1;
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    hits
+}
+
 fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let wide = area.width >= 72;
     let logo_width = if wide { 26 } else { 10 };
@@ -919,6 +985,48 @@ fn highlight(theme: &Theme) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+fn fit_row_text(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if Line::raw(text).width() <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for ch in text.chars() {
+        out.push(ch);
+        if Line::raw(out.as_str()).width() > width - 1 {
+            out.pop();
+            break;
+        }
+    }
+    out.push('…');
+    out
+}
+
+fn aligned_row(
+    width: usize,
+    marker: &str,
+    title: &str,
+    data: &str,
+    title_style: Style,
+    theme: &Theme,
+) -> ListItem<'static> {
+    let marker = fit_row_text(marker, width);
+    let remaining = width.saturating_sub(Line::raw(marker.as_str()).width());
+    let right = fit_row_text(data, if remaining >= 20 { remaining / 2 } else { 0 });
+    let right_width = Line::raw(right.as_str()).width();
+    let left_width = remaining.saturating_sub(right_width + if right.is_empty() { 0 } else { 2 });
+    let left = fit_row_text(title, left_width);
+    let gap = remaining.saturating_sub(Line::raw(left.as_str()).width() + right_width);
+    ListItem::new(Line::from(vec![
+        Span::styled(marker, Style::default().fg(theme.accent)),
+        Span::styled(left, title_style),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(right, Style::default().fg(theme.dim)),
+    ]))
+}
+
 fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     if !app.browser.is_songs() {
         let playing = app.current_track_path().cloned();
@@ -998,14 +1106,14 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
             } else {
                 Style::default().fg(theme.text)
             };
-            ListItem::new(Line::from(vec![
-                Span::styled(marker, Style::default().fg(theme.accent)),
-                Span::styled(track.title.clone(), title_style),
-                Span::styled(
-                    format!("   {}", track.detail()),
-                    Style::default().fg(theme.dim),
-                ),
-            ]))
+            aligned_row(
+                area.width.saturating_sub(2) as usize,
+                marker,
+                &track.title,
+                &track.detail(),
+                title_style,
+                theme,
+            )
         })
         .collect();
 
@@ -1123,14 +1231,14 @@ fn draw_library_browser(
                 } else {
                     "› "
                 };
-                ListItem::new(Line::from(vec![
-                    Span::styled(marker, Style::default().fg(theme.accent)),
-                    Span::styled(
-                        row.title.clone(),
-                        Style::default().fg(if active { theme.accent } else { theme.text }),
-                    ),
-                    Span::styled(format!("   {}", row.detail), Style::default().fg(theme.dim)),
-                ]))
+                aligned_row(
+                    list_area.width.saturating_sub(2) as usize,
+                    marker,
+                    &row.title,
+                    &row.detail,
+                    Style::default().fg(if active { theme.accent } else { theme.text }),
+                    theme,
+                )
             })
             .collect();
         frame.render_stateful_widget(
@@ -1145,7 +1253,7 @@ fn draw_library_browser(
 }
 
 fn draw_playlists(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    let row_width = area.width.saturating_sub(4) as usize;
+    let row_width = area.width.saturating_sub(2) as usize;
     let (title, items, message): (String, Vec<ListItem>, &str) = match app.open_playlist {
         None => {
             let items = app
@@ -1154,11 +1262,6 @@ fn draw_playlists(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
                 .map(|list| {
                     let playing = app.playing_playlist(&list.name);
                     let count = format!("{} tracks", list.tracks.len());
-                    let name_width = row_width.saturating_sub(count.chars().count() + 4);
-                    let name = truncate(&list.name, name_width);
-                    let pad = row_width
-                        .saturating_sub(name.chars().count() + count.chars().count() + 2)
-                        .max(1);
                     let name_style = if playing {
                         Style::default()
                             .fg(theme.accent)
@@ -1166,15 +1269,14 @@ fn draw_playlists(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
                     } else {
                         Style::default().fg(theme.text)
                     };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            if playing { "♪ " } else { "≡ " },
-                            Style::default().fg(theme.accent),
-                        ),
-                        Span::styled(name, name_style),
-                        Span::raw(" ".repeat(pad)),
-                        Span::styled(count, Style::default().fg(theme.dim)),
-                    ]))
+                    aligned_row(
+                        row_width,
+                        if playing { "♪ " } else { "≡ " },
+                        &list.name,
+                        &count,
+                        name_style,
+                        theme,
+                    )
                 })
                 .collect();
             (
@@ -1213,14 +1315,14 @@ fn draw_playlists(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
                     } else {
                         Style::default().fg(theme.text)
                     };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(marker, Style::default().fg(theme.accent)),
-                        Span::styled(track.title.clone(), title_style),
-                        Span::styled(
-                            format!("   {}", track.detail()),
-                            Style::default().fg(theme.dim),
-                        ),
-                    ]))
+                    aligned_row(
+                        row_width,
+                        marker,
+                        &track.title,
+                        &track.detail(),
+                        title_style,
+                        theme,
+                    )
                 })
                 .collect();
             let marked = if app.marked_tracks.is_empty() {
@@ -1285,16 +1387,14 @@ fn draw_queue_view(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) 
                 .up_next
                 .iter()
                 .map(|track| {
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            truncate(&track.title, list_area.width as usize / 2),
-                            Style::default().fg(theme.text),
-                        ),
-                        Span::styled(
-                            format!("   {}", track.artist_or_folder()),
-                            Style::default().fg(theme.dim),
-                        ),
-                    ]))
+                    aligned_row(
+                        list_area.width as usize,
+                        "  ",
+                        &track.title,
+                        &track.detail(),
+                        Style::default().fg(theme.text),
+                        theme,
+                    )
                 })
                 .collect();
             frame.render_stateful_widget(
@@ -1361,6 +1461,10 @@ const HELP: &[(&str, &str)] = &[
     ("", "Playlists"),
     ("@mark", "new playlist / add files to an open playlist"),
     ("@open-list", "open the selected playlist"),
+    (
+        "@rename",
+        "rename the selected or open playlist (Ctrl-u clears the name)",
+    ),
     (
         "@track-mark / @track-mark-all",
         "mark a track / mark all (open playlist)",
@@ -1807,11 +1911,24 @@ fn draw_spectrum(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    let block = panel(theme, "Now playing".to_string());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let [top, bottom] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+    if area.width == 0 || area.height == 0 {
+        app.hit.progress = Rect::default();
+        return;
+    }
+    let compact = area.height < 4;
+    let inner = if compact {
+        area
+    } else {
+        let block = panel(theme, "Now playing".to_string());
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        inner
+    };
+    let [top, bottom] = if inner.height == 1 {
+        [inner, Rect::new(inner.x, inner.bottom(), inner.width, 0)]
+    } else {
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner)
+    };
 
     let (title, artist) = match app.active {
         Active::Spotify => (app.sp.title.clone(), app.sp.artist.clone()),
@@ -1848,7 +1965,8 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme)
     if matches!(
         app.active,
         Active::Local(_) | Active::Queue(_) | Active::Extra
-    ) && !app.album.is_empty()
+    ) && !compact
+        && !app.album.is_empty()
     {
         if detail.is_empty() {
             detail = app.album.clone();
@@ -1884,6 +2002,9 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme)
     if let Some(left) = app.sleep_left() {
         badges.push(format!("sleep {}m", left.as_secs().div_ceil(60)));
     }
+    if compact {
+        badges.clear();
+    }
     let badge_text = badges.join(" · ");
     let badge_width = if badge_text.is_empty() {
         0
@@ -1904,8 +2025,17 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme)
         );
     }
 
+    let volume_width = if !compact {
+        22
+    } else if inner.width >= 32 {
+        9
+    } else if inner.width >= 18 {
+        5
+    } else {
+        0
+    };
     let [progress, volume] =
-        Layout::horizontal([Constraint::Min(10), Constraint::Length(22)]).areas(bottom);
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(volume_width)]).areas(bottom);
     app.hit.progress = progress;
 
     let position = app.position();
@@ -1919,6 +2049,15 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme)
             _ => (0.0, String::from("--:--")),
         },
     };
+    let label = if compact && progress.width < 18 {
+        match app.active {
+            Active::None => "--:--".to_string(),
+            Active::Radio(_) => "LIVE".to_string(),
+            _ => format_time(position),
+        }
+    } else {
+        label
+    };
     frame.render_widget(
         LineGauge::default()
             .filled_symbol(symbols::line::THICK_HORIZONTAL)
@@ -1930,6 +2069,22 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme)
         progress,
     );
 
+    if compact {
+        let readout = if app.muted {
+            "MUTE".to_string()
+        } else if volume.width >= 9 {
+            format!("VOL {:.0}%", app.volume() * 100.0)
+        } else {
+            format!("{:.0}%", app.volume() * 100.0)
+        };
+        frame.render_widget(
+            Paragraph::new(readout)
+                .style(Style::default().fg(theme.secondary))
+                .alignment(Alignment::Right),
+            volume,
+        );
+        return;
+    }
     let level = if app.muted { 0.0 } else { app.volume() };
     let cells = 8usize;
     let filled = (level * cells as f32).round() as usize;
@@ -1951,7 +2106,7 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme)
     frame.render_widget(Paragraph::new(Line::from(volume_spans)), volume);
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, compact: bool) {
     if let Some(input) = &app.cmdline {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -2071,6 +2226,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             keys.insert(6, (k(Action::Cancel), "back"));
         }
     }
+    if app.tab == Tab::Playlists {
+        keys.insert(2, (k(Action::Rename), "rename"));
+    }
+    keys.insert(2, (k(Action::QueueView), "queue view"));
     keys.extend([
         (k(Action::Command), "command"),
         (k(Action::Theme), "theme"),
@@ -2078,6 +2237,28 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         (k(Action::TabNext), "switch"),
         (k(Action::Quit), "quit"),
     ]);
+    if compact {
+        keys = vec![
+            (k(Action::Play), "play"),
+            (k(Action::Pause), "pause"),
+            (
+                format!("{}/{}", k(Action::VolumeUp), k(Action::VolumeDown)),
+                "vol",
+            ),
+            (k(Action::QueueView), "queue"),
+        ];
+        if app.tab == Tab::Library {
+            keys.push((k(Action::LibraryView), "view"));
+        }
+        if app.tab == Tab::Playlists {
+            keys.push((k(Action::Rename), "rename"));
+        }
+        keys.extend([
+            (k(Action::TabNext), "tabs"),
+            (k(Action::Help), "help"),
+            (k(Action::Quit), "quit"),
+        ]);
+    }
     if app.tab == Tab::Library && app.filtering {
         keys = vec![
             ("type".to_string(), "filter"),
@@ -2255,6 +2436,73 @@ mod tests {
             .draw(|frame| draw_finder(frame, frame.area(), &mut finder, &themes[0]))
             .unwrap();
         assert!(!render_text(&small).contains("Find stations"));
+    }
+
+    #[test]
+    fn song_rows_keep_titles_left_and_metadata_on_the_same_right_edge() {
+        let theme = &builtin_themes()[0];
+        let area = Rect::new(0, 0, 64, 2);
+        let mut buffer = Buffer::empty(area);
+        let long = "A long song title ".repeat(8);
+        List::new(vec![
+            aligned_row(64, "♪ ", "Short", "METADATA", Style::default(), theme),
+            aligned_row(64, "  ", &long, "METADATA", Style::default(), theme),
+        ])
+        .render(area, &mut buffer);
+        assert_eq!(buffer[(2, 0)].symbol(), "S");
+        assert_eq!(buffer[(2, 1)].symbol(), "A");
+        for row in 0..2 {
+            let right: String = (56..64)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect();
+            assert_eq!(right, "METADATA");
+        }
+    }
+
+    #[test]
+    fn aligned_rows_fit_narrow_windows_and_wide_unicode_titles() {
+        let theme = &builtin_themes()[0];
+        for width in 0..80 {
+            let area = Rect::new(0, 0, width, 1);
+            let mut buffer = Buffer::empty(area);
+            List::new(vec![aligned_row(
+                width as usize,
+                "♪ ",
+                "東京の歌 — Café",
+                "Artist",
+                Style::default(),
+                theme,
+            )])
+            .render(area, &mut buffer);
+            if width >= 40 {
+                assert_eq!(buffer[(width - 1, 0)].symbol(), "t");
+            }
+        }
+        assert_eq!(fit_row_text("東京", 3), "東…");
+        assert_eq!(fit_row_text("title", 0), "");
+    }
+
+    #[test]
+    fn compact_header_keeps_tab_targets_inside_the_window() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let theme = &builtin_themes()[0];
+        for width in [1, 12, 29, 30, 40, 60, 100] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let hits = draw_compact_header(frame, frame.area(), Tab::Playlists, theme);
+                    assert_eq!(hits.len(), if width < 30 { 1 } else { 4 });
+                    for (rect, _) in hits {
+                        assert!(rect.width > 0);
+                        assert!(rect.right() <= frame.area().right());
+                        assert_eq!(rect.height, 1);
+                    }
+                })
+                .unwrap();
+            if width >= 30 {
+                assert!(render_text(&terminal).contains("2 Lists"));
+            }
+        }
     }
 
     fn render_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
