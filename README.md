@@ -10,6 +10,7 @@ A terminal audio player written in Rust. It plays local files, internet radio an
 
 - Local library with automatic reload when files are added or removed, a built-in folder browser, tag reading (title, artist, album, track number), sorting and a live filter
 - Embedded cover art (or `cover.jpg` and similar next to the files) drawn in the player as colored half blocks
+- Favorites: `f` adds or removes a ♥, `F` shows only your favorites
 - Repeat modes, a play queue ("up next"), a sleep timer and a key help overlay (`?`)
 - Gapless playback, optional crossfade, a ten band equalizer with presets and ReplayGain
 - Synced (`.lrc`) and plain lyrics, shown in an overlay
@@ -79,6 +80,7 @@ Without arguments CRAB opens the folders you used last time, or `~/Music` the fi
 | `?` | key help |
 | `:` | command line |
 | `I` | show or hide CPU and memory use |
+| `f` / `F` | add or remove a favorite / show only favorites |
 | `>` / `<` | next / previous track |
 | `o` | choose a music folder |
 | `a` / `A` | mark a track / mark all (Library); create a playlist or add files to one (Playlists) |
@@ -114,7 +116,7 @@ Tags are read with lofty. Cover art comes from the file itself or from `cover`, 
 
 Lyrics are read from a `.lrc` or `.txt` file with the same name as the track, or from the lyrics tag. With a synced file the current line follows the song.
 
-The last state (shuffle, repeat, volume, track and position) is stored in `~/.local/state/crab/state.toml`.
+The last state (shuffle, repeat, volume, track, position and favorites) is stored in `~/.local/state/crab/state.toml`.
 
 ### Scrobbling
 
@@ -153,7 +155,7 @@ In the `vim` preset a number typed before an action repeats it: `5j` moves five 
 
 ![The command line](docs/commands.png)
 
-`:` opens a command line at the bottom, and Tab completes names. Rarely used actions are also available as commands:
+`:` opens a command line at the bottom. Tab completes command names, action names and values (`:eq ro` becomes `:eq rock`); when several options match they are listed in the footer and Tab cycles through them. Up and down recall the previous commands. Rarely used actions are also available as commands:
 
 | Command | Does |
 | --- | --- |
@@ -165,6 +167,12 @@ In the `vim` preset a number typed before an action repeats it: `5j` moves five 
 | `:seek 1:30`, `:seek +10` | seek to a time or by seconds |
 | `:theme name`, `:viz mirror` | switch theme or visualizer |
 | `:tab radio`, `:save`, `:import`, `:export` | jump and open dialogs |
+| `:shuffle`, `:mute`, `:fade 3` | shuffle, mute, crossfade length in seconds |
+| `:goto text` | select the first track that matches |
+| `:play text` | play the first track that matches |
+| `:find text`, `:find` | filter the library, or clear the filter |
+| `:add text` | queue every track that matches |
+| `:fav`, `:favs` | toggle a favorite, show only favorites |
 | `:keys vim`, `:map`, `:unmap`, `:reset` | key presets and remapping, see below |
 | `:stats` | CPU, memory and uptime of CRAB |
 | `:play`, `:pause`, `:next`, `:prev`, `:stop`, `:queue`, `:lyrics`, `:clock`, `:reload`, `:folder`, `:help`, `:quit` | the matching actions |
@@ -184,7 +192,7 @@ The same thing in `config.toml`:
     next = ["n", ">", "ctrl-n"]
     lyrics = []            # no key
 
-A binding replaces the keys of that action and takes a key away from any other action that used it. A key is a single character, or one of `space`, `enter`, `esc`, `tab`, `backtab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `f1` to `f12`, optionally with the `ctrl-` prefix. The action names are the ones `:map` accepts: quit, cancel, back, search, repeat, queue, queue-view, help, mark, mark-all, sort, track-mark, track-mark-all, save, remove, open-list, import, export, sleep, eq, lyrics, visualizer, clock, folder, tab-next, tab-prev, tab-1 to tab-4, up, down, page-up, page-down, half-up, half-down, top, bottom, play, pause, next, prev, seek-forward, seek-back, volume-up, volume-down, mute, theme, reload, shuffle, visual, command and stats.
+A binding replaces the keys of that action and takes a key away from any other action that used it. A key is a single character, or one of `space`, `enter`, `esc`, `tab`, `backtab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `f1` to `f12`, optionally with the `ctrl-` prefix. The action names are the ones `:map` accepts: quit, cancel, back, search, repeat, queue, queue-view, help, mark, mark-all, sort, track-mark, track-mark-all, save, remove, open-list, import, export, sleep, eq, lyrics, visualizer, clock, folder, tab-next, tab-prev, tab-1 to tab-4, up, down, page-up, page-down, half-up, half-down, top, bottom, play, pause, next, prev, seek-forward, seek-back, volume-up, volume-down, mute, theme, reload, shuffle, visual, command, stats, favorite and favorites.
 
 The key help (`?`) and the footer always show the keys you have now.
 
