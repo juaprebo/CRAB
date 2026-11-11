@@ -43,7 +43,7 @@ Then build and install it to `~/.local/bin`:
 
 On Linux, an interactive `make install` asks whether to register CRAB for double-click opening. The default is No. If you accept, choose individual types such as `mp3`, a combination such as `mp3,flac`, or `all`. The default selection is MP3 only: WAV and all other unselected types keep their current default applications. The launcher uses Kitty when available or the desktop default terminal otherwise. Files opened from the desktop start playing automatically.
 
-For unattended installs, use `make install ASSOCIATE=yes AUDIO_TYPES=mp3` to associate only MP3, `AUDIO_TYPES=mp3,flac` for a combination, or `AUDIO_TYPES=all` for every currently available audio type. Use `ASSOCIATE=no` to skip associations. Without a terminal, `ASSOCIATE=ask` skips the question. `make desktop AUDIO_TYPES=mp3` enables integration later. Root and staged `DESTDIR` installs never change desktop defaults. Desktop integration requires `xdg-mime` from `xdg-utils`.
+For unattended installs, use `make install ASSOCIATE=yes AUDIO_TYPES=mp3` to associate only MP3, `AUDIO_TYPES=mp3,flac` for a combination, or `AUDIO_TYPES=all` for every currently available audio type. Use `ASSOCIATE=no` to skip associations. Without a terminal, `ASSOCIATE=ask` skips the question. `make desktop AUDIO_TYPES=mp3` enables integration later. Root and staged `DESTDIR` installs never change desktop defaults. Desktop integration requires `xdg-mime` from `xdg-utils`. It also installs the CRAB icon (`assets/crab.svg`) so launchers such as walker, rofi or the desktop menu show it.
 
 Or only build it and run it from the repository:
 

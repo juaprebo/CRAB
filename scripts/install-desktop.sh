@@ -105,7 +105,7 @@ Name=CRAB
 GenericName=Audio Player
 Comment=Open audio files in CRAB
 Exec=$exec_line
-Icon=audio-x-generic
+Icon=crab
 Terminal=$terminal
 Categories=AudioVideo;Audio;Player;
 MimeType=$all_mimes
@@ -113,6 +113,15 @@ StartupNotify=false
 EOF
 if command -v desktop-file-validate >/dev/null 2>&1; then
     desktop-file-validate "$temp"
+fi
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}"
+if [ -f "$script_dir/../assets/crab.svg" ]; then
+    icon_dir="$data_dir/icons/hicolor/scalable/apps"
+    mkdir -p "$icon_dir"
+    install -m 644 "$script_dir/../assets/crab.svg" "$icon_dir/crab.svg"
+    if command -v gtk-update-icon-cache >/dev/null 2>&1 && [ -f "$data_dir/icons/hicolor/index.theme" ]; then
+        gtk-update-icon-cache -q -t "$data_dir/icons/hicolor" || true
+    fi
 fi
 staged=$(mktemp "$applications_dir/.crab-XXXXXX.tmp")
 cat "$temp" > "$staged"
