@@ -1,4 +1,5 @@
 use crate::analyzer::SampleTap;
+use crate::eq::{EqParams, Fx};
 use anyhow::{Context, Result, anyhow};
 use rodio::{
     ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Sample, SampleRate, Source,
@@ -8,7 +9,7 @@ use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub enum Input {
     File(BufReader<File>),
@@ -174,7 +175,7 @@ impl Source for SpotifySource {
     }
 }
 
-pub type Track = Tapped<Decoder<Input>>;
+pub type Track = Tapped<Fx<Decoder<Input>>>;
 
 pub struct Engine {
     device: MixerDeviceSink,
@@ -182,7 +183,17 @@ pub struct Engine {
     spotify_player: Player,
     spotify_tx: SyncSender<Vec<f32>>,
     pub tap: Arc<SampleTap>,
+    pub eq: Arc<EqParams>,
     volume: f32,
+    epoch: u64,
+    fading: Vec<Fade>,
+    fade_in: Option<(Instant, Duration)>,
+}
+
+struct Fade {
+    player: Player,
+    started: Instant,
+    length: Duration,
 }
 
 impl Engine {
@@ -209,7 +220,11 @@ impl Engine {
             spotify_player,
             spotify_tx,
             tap,
+            eq: EqParams::new(),
             volume: 0.7,
+            epoch: 0,
+            fading: Vec::new(),
+            fade_in: None,
         };
         engine.apply_volume();
         Ok(engine)
@@ -224,7 +239,9 @@ impl Engine {
     }
 
     fn apply_volume(&mut self) {
-        self.player.set_volume(self.volume);
+        if self.fade_in.is_none() {
+            self.player.set_volume(self.volume);
+        }
         self.spotify_player.set_volume(self.volume);
     }
 
@@ -242,7 +259,12 @@ impl Engine {
         self.apply_volume();
     }
 
-    pub fn open_file(path: &Path, tap: Arc<SampleTap>) -> Result<Track> {
+    pub fn open_file(
+        path: &Path,
+        tap: Arc<SampleTap>,
+        eq: Arc<EqParams>,
+        gain: f32,
+    ) -> Result<Track> {
         let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         let len = file.metadata()?.len();
         let mut builder = Decoder::builder()
@@ -255,13 +277,14 @@ impl Engine {
         let decoder = builder
             .build()
             .map_err(|e| anyhow!("cannot decode {}: {e}", path.display()))?;
-        Ok(Tapped::new(decoder, tap))
+        Ok(Tapped::new(Fx::new(decoder, eq, gain), tap))
     }
 
     pub fn open_stream(
         stream: crate::radio::BufferedStream,
         mime: &str,
         tap: Arc<SampleTap>,
+        eq: Arc<EqParams>,
     ) -> Result<Track> {
         let mut builder = Decoder::builder()
             .with_data(Input::Stream(Mutex::new(stream)))
@@ -272,11 +295,14 @@ impl Engine {
         let decoder = builder
             .build()
             .map_err(|e| anyhow!("cannot decode stream: {e}"))?;
-        Ok(Tapped::new(decoder, tap))
+        Ok(Tapped::new(Fx::new(decoder, eq, 1.0), tap))
     }
 
     pub fn play(&mut self, track: Track) -> Option<Duration> {
         let duration = track.total_duration();
+        self.fading.clear();
+        self.fade_in = None;
+        self.epoch += 1;
         self.player = Player::connect_new(self.device.mixer());
         self.player.set_volume(self.volume);
         self.tap.clear();
@@ -285,7 +311,57 @@ impl Engine {
         duration
     }
 
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn queue_next(&mut self, track: Track) -> Option<Duration> {
+        let duration = track.total_duration();
+        self.player.append(track);
+        duration
+    }
+
+    pub fn sources(&self) -> usize {
+        self.player.len()
+    }
+
+    pub fn crossfade_to(&mut self, track: Track, length: Duration) -> Option<Duration> {
+        let duration = track.total_duration();
+        let old = std::mem::replace(&mut self.player, Player::connect_new(self.device.mixer()));
+        self.fading.push(Fade {
+            player: old,
+            started: Instant::now(),
+            length,
+        });
+        self.epoch += 1;
+        self.player.set_volume(0.0);
+        self.player.append(track);
+        self.player.play();
+        self.fade_in = Some((Instant::now(), length));
+        duration
+    }
+
+    pub fn update(&mut self) {
+        if let Some((started, length)) = self.fade_in {
+            let t = (started.elapsed().as_secs_f32() / length.as_secs_f32().max(0.001)).min(1.0);
+            self.player.set_volume(self.volume * t);
+            if t >= 1.0 {
+                self.fade_in = None;
+            }
+        }
+        self.fading
+            .retain(|fade| fade.started.elapsed() < fade.length);
+        for fade in &self.fading {
+            let t = fade.started.elapsed().as_secs_f32() / fade.length.as_secs_f32().max(0.001);
+            fade.player
+                .set_volume(self.volume * (1.0 - t).clamp(0.0, 1.0));
+        }
+    }
+
     pub fn stop(&mut self) {
+        self.fading.clear();
+        self.fade_in = None;
+        self.epoch += 1;
         self.player = Player::connect_new(self.device.mixer());
         self.player.set_volume(self.volume);
         self.tap.clear();
@@ -294,9 +370,11 @@ impl Engine {
     pub fn toggle_pause(&self) -> bool {
         if self.player.is_paused() {
             self.player.play();
+            self.fading.iter().for_each(|f| f.player.play());
             false
         } else {
             self.player.pause();
+            self.fading.iter().for_each(|f| f.player.pause());
             true
         }
     }
@@ -311,6 +389,10 @@ impl Engine {
 
     pub fn position(&self) -> Duration {
         self.player.get_pos()
+    }
+
+    pub fn seek_to(&self, target: Duration) -> bool {
+        self.player.try_seek(target).is_ok()
     }
 
     pub fn seek_by(&self, forward: bool, step: Duration, duration: Option<Duration>) -> bool {
@@ -338,7 +420,7 @@ mod tests {
         let path = dir.join("tone.wav");
         crate::testutil::write_wav(&path, 3);
         let tap = SampleTap::new();
-        let mut track = Engine::open_file(&path, tap.clone()).unwrap();
+        let mut track = Engine::open_file(&path, tap.clone(), EqParams::new(), 1.0).unwrap();
         let count = (&mut track).take(44_100 * 2).count();
         assert_eq!(count, 44_100 * 2);
         assert!(track.total_duration().is_some());

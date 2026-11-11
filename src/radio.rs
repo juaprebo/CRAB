@@ -285,8 +285,13 @@ mod tests {
             title.clone(),
         )
         .unwrap();
-        let mut track =
-            Engine::open_stream(connection.stream, &connection.mime, SampleTap::new()).unwrap();
+        let mut track = Engine::open_stream(
+            connection.stream,
+            &connection.mime,
+            SampleTap::new(),
+            crate::eq::EqParams::new(),
+        )
+        .unwrap();
         let count = (&mut track).take(44_100 * 2).count();
         assert!(count > 0);
     }
