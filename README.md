@@ -17,6 +17,7 @@ A terminal audio player written in Rust. It plays local files, internet radio an
 - Scrobbling to ListenBrainz
 - Media keys and desktop media controls (MPRIS) on Linux
 - Playback state (shuffle, repeat, volume, last track and position) restored on the next start
+- English and Spanish interfaces with a saved language selector
 - A `vim` key preset, a `:` command line, keys you can remap and a CPU and memory readout
 - Mouse support: click rows and tabs, double click to play, click the progress bar to seek, scroll wheel
 - Playlists that mix tracks from any folder, including files that are not in your library
@@ -97,12 +98,26 @@ Without arguments CRAB opens the folders you used last time, or `~/Music` the fi
 | `c` | show or hide the clock in the header |
 | `/` | find radio stations (Radio tab); filter the library as you type in the Library tab (Esc clears, Enter keeps) |
 | `x` | remove the selected station, playlist or playlist track, press twice |
-| `F2` | rename the selected or open playlist |
+| `F2` | rename the selected file in Library, or the selected or open playlist in Playlists |
 | `t` | open the theme picker |
 | `r` | reload the configuration |
 | Tab, `1` `2` `3` `4` | switch between Library, Playlists, Radio and Spotify |
 | `q` | quit |
 | Esc | cancel what is in progress (a station that is connecting, a dialog); it never quits |
+
+### Interface language
+
+Run `:language` inside CRAB to choose **English** or **Español** with the arrow keys and Enter. Esc cancels. You can also use `:language es` or `:language en`; Tab completes the codes. The selection applies immediately and is saved in `~/.config/crab/config.toml`:
+
+```toml
+language = "es"
+```
+
+English is the default and the fallback for missing translations or an unsupported saved language. The interface, help, dialogs and application messages are translated. `--help` and `--formats` also use the saved language. Commands, shortcuts, track metadata, file paths and playlist names keep their original values. Technical diagnostics from the operating system and dependencies may remain in their original language.
+
+### Renaming local files
+
+In Library, select an individual song and press `F2` (or use `:rename New name.mp3`). The dialog starts with the current file name; `Ctrl-u` clears it and `Esc` cancels. Keep the original extension. CRAB renames the file in the same directory without overwriting an existing entry and updates its internal playlists, favorites, queue and saved playback path. Playback continues. The audio tags are unchanged, so a tagged title may still show the same text. External M3U files and companion lyrics files are not renamed or rewritten. In Playlists, `F2` continues to rename the playlist itself.
 
 ### Audio formats
 
@@ -198,7 +213,8 @@ In the `vim` preset a number typed before an action repeats it: `5j` moves five 
 | Command | Does |
 | --- | --- |
 | `:sort album` | sort by path, title, artist or album |
-| `:rename New name` | rename the selected or open playlist (`:rename` opens the dialog) |
+| `:rename New name` | rename a Library file or playlist (`:rename` opens the dialog; file names keep their extension) |
+| `:language [en\|es]` | choose the interface language; no argument opens the selector |
 | `:view albums` | browse songs, artists or albums |
 | `:sleep 30` / `:sleep off` | sleep timer in minutes |
 | `:eq rock` | equalizer preset |
@@ -238,7 +254,7 @@ The key help (`?`) and the footer always show the keys you have now.
 
 ### Resource usage
 
-`I` shows or hides the CPU and memory used by CRAB next to the badges of the player (for example `cpu 3% · 41 MB`), and `:stats` prints the detail with the uptime. The CPU is a percentage of one core.
+`I` shows or hides the CPU and memory used by CRAB next to the badges of the player (for example `cpu 3% · 41 MB`), and `:stats` prints the detail with the uptime. The CPU is a percentage of one core. The visibility set with `I` is saved immediately and restored on the next start.
 
 ### Folder browser
 
@@ -360,6 +376,8 @@ A crab is drawn behind the lists and scales with the terminal size. `art_strengt
 CRAB is free and open source. If you enjoy it and want to give something back, you can [buy me a coffee on Ko-fi](https://ko-fi.com/juaprebo). Donations are voluntary, unlock nothing and have no relation to the Spotify integration.
 
 ## Contributing
+
+See [Architecture and translations](docs/architecture.md) for feature modules, the four layers inside each module, injected services and translation conventions.
 
 Issues and pull requests are welcome. Run `cargo fmt` and `cargo test` before sending a change. Unless you state otherwise, any contribution you submit is licensed under the same terms as the project, as described below.
 
