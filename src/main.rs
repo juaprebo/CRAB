@@ -60,6 +60,22 @@ fn requested_track(roots: &[PathBuf]) -> Option<PathBuf> {
         .cloned()
 }
 
+fn forward_to_running(paths: &[PathBuf]) -> bool {
+    if paths.is_empty()
+        || !paths
+            .iter()
+            .all(|path| path.is_file() && library_store::is_audio(path))
+        || !settings::infrastructure::config::single_instance_enabled()
+    {
+        return false;
+    }
+    let files: Vec<PathBuf> = paths
+        .iter()
+        .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+        .collect();
+    shell::infrastructure::control::open_in_running(&files)
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let language = settings::infrastructure::config::configured_language();
@@ -71,6 +87,10 @@ fn main() -> Result<()> {
         Some("--version") | Some("-V") => {
             println!("crab {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
+        }
+        Some("--forward") => {
+            let paths: Vec<PathBuf> = args[1..].iter().map(PathBuf::from).collect();
+            std::process::exit(if forward_to_running(&paths) { 0 } else { 1 });
         }
         Some("ctl") => std::process::exit(shell::infrastructure::control::run_client(&args[1..])),
         Some("--formats") => {
@@ -97,19 +117,8 @@ fn main() -> Result<()> {
 
     let mut roots: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
     let autoplay = requested_track(&roots);
-    if !roots.is_empty()
-        && roots
-            .iter()
-            .all(|path| path.is_file() && library_store::is_audio(path))
-        && settings::infrastructure::config::single_instance_enabled()
-    {
-        let files: Vec<PathBuf> = roots
-            .iter()
-            .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
-            .collect();
-        if shell::infrastructure::control::open_in_running(&files) {
-            return Ok(());
-        }
+    if forward_to_running(&roots) {
+        return Ok(());
     }
     if roots.is_empty() {
         roots = library_store::load_saved_roots();

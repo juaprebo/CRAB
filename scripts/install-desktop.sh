@@ -83,7 +83,8 @@ terminal=true
 exec_line="$(quote_exec "$binary") %F"
 if kitty=$(command -v kitty 2>/dev/null); then
     terminal=false
-    exec_line="$(quote_exec "$kitty") --class crab --title CRAB $exec_line"
+    launcher='bin=$0; term=$1; shift; "$bin" --forward "$@" || exec "$term" --class crab --title CRAB "$bin" "$@"'
+    exec_line="/bin/sh -c $(quote_exec "$launcher") $(quote_exec "$binary") $(quote_exec "$kitty") %F"
 fi
 applications_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p "$applications_dir"
