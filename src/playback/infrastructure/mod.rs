@@ -1,0 +1,15 @@
+pub mod artwork;
+pub mod engine;
+pub mod equalizer;
+pub mod ffmpeg;
+pub mod formats;
+pub mod lyrics;
+pub mod media;
+pub mod rodio_decoder;
+pub mod scrobble;
+#[cfg(feature = "spotify")]
+pub mod spotify;
+#[cfg(not(feature = "spotify"))]
+#[path = "spotify_stub.rs"]
+pub mod spotify;
+pub mod system_volume;

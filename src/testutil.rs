@@ -39,3 +39,24 @@ pub fn write_wav(path: &Path, seconds: u32) {
     }
     std::fs::write(path, bytes).unwrap();
 }
+
+pub fn track(path: impl Into<std::path::PathBuf>) -> crate::library::domain::library::LocalTrack {
+    let path = path.into();
+    crate::library::domain::library::LocalTrack {
+        title: path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        folder: String::new(),
+        artist: String::new(),
+        album_artist: String::new(),
+        album: String::new(),
+        track: 0,
+        disc: 0,
+        year: 0,
+        gain_db: None,
+        duration: None,
+        path,
+    }
+}

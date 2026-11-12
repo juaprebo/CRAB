@@ -1,0 +1,10 @@
+pub mod art;
+pub mod cli;
+pub mod commands;
+pub mod controller;
+pub mod keys;
+pub mod process_stats;
+pub mod responsive;
+pub mod terminal;
+pub mod visualizers;
+pub mod widgets;

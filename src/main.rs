@@ -1,48 +1,21 @@
-mod analyzer;
-mod app;
-mod art;
-mod clock;
-mod commands;
-mod config;
-mod cover;
-mod cover_display;
-mod engine;
-mod eq;
-mod ffmpeg;
-mod finder;
-mod formats;
-mod keys;
 mod library;
-mod library_browser;
-mod lyrics;
-mod media;
-mod picker;
-mod playlist;
+mod localization;
+mod playback;
+mod playlists;
 mod radio;
-mod responsive;
-mod scrobble;
-#[cfg(feature = "spotify")]
-mod spotify;
-#[cfg(not(feature = "spotify"))]
-#[path = "spotify_stub.rs"]
-mod spotify;
-mod state;
-mod stats;
-mod sysvol;
+mod settings;
+mod shell;
 #[cfg(test)]
 mod testutil;
-mod theme;
-mod theme_editor;
-mod ui;
-mod viz;
 
 use anyhow::Result;
-use app::App;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
-use engine::Engine;
-use ratatui::DefaultTerminal;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use library::infrastructure::scanner as library_store;
+use localization::presentation::messages::text as tr;
+use playback::infrastructure::engine::Engine;
+use playback::infrastructure::spotify;
+use shell::presentation::controller::App;
 use std::path::PathBuf;
-use std::time::Duration;
 
 const HELP: &str = "CRAB - terminal audio player
 
@@ -79,57 +52,19 @@ fn redirect_stderr() {
 #[cfg(not(unix))]
 fn redirect_stderr() {}
 
-fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
-    let mut covers = cover_display::Display::new();
-    app.native_covers = covers.enabled;
-    let result = run_loop(terminal, app, &mut covers);
-    let _ = covers.clear(&mut std::io::stdout());
-    result
-}
-
-fn run_loop(
-    terminal: &mut DefaultTerminal,
-    app: &mut App,
-    covers: &mut cover_display::Display,
-) -> Result<()> {
-    while !app.quit {
-        let width = terminal.size()?.width;
-        app.tick(ui::bar_count(width, &app.config.visualizer));
-        terminal.draw(|frame| ui::draw(frame, app))?;
-        let pixels = crossterm::terminal::window_size()
-            .ok()
-            .filter(|size| size.columns > 0 && size.rows > 0 && size.width > 0 && size.height > 0)
-            .map(|size| (size.width / size.columns, size.height / size.rows))
-            .unwrap_or((8, 16));
-        covers.render(
-            &mut std::io::stdout(),
-            app.displayed_cover(),
-            app.cover_target(),
-            pixels,
-        )?;
-        if event::poll(Duration::from_millis(33))? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
-                Event::Mouse(mouse) => app.on_mouse(mouse),
-                _ => {}
-            }
-        }
-    }
-    Ok(())
-}
-
 fn requested_track(roots: &[PathBuf]) -> Option<PathBuf> {
     roots
         .iter()
-        .find(|path| path.is_file() && library::is_audio(path))
+        .find(|path| path.is_file() && library_store::is_audio(path))
         .cloned()
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let language = settings::infrastructure::config::configured_language();
     match args.first().map(String::as_str) {
         Some("--help") | Some("-h") => {
-            print!("{HELP}");
+            print!("{}", tr(language, HELP));
             return Ok(());
         }
         Some("--version") | Some("-V") => {
@@ -137,13 +72,22 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Some("--formats") => {
-            formats::print();
+            shell::presentation::cli::print_formats(language);
             return Ok(());
         }
         Some("login") => {
-            println!("Opening the Spotify login page in your browser...");
+            println!(
+                "{}",
+                tr(
+                    language,
+                    "Opening the Spotify login page in your browser..."
+                )
+            );
             spotify::login()?;
-            println!("Signed in. Start CRAB and open the Spotify tab.");
+            println!(
+                "{}",
+                tr(language, "Signed in. Start CRAB and open the Spotify tab.")
+            );
             return Ok(());
         }
         _ => {}
@@ -152,7 +96,7 @@ fn main() -> Result<()> {
     let mut roots: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
     let autoplay = requested_track(&roots);
     if roots.is_empty() {
-        roots = library::load_saved_roots();
+        roots = library_store::load_saved_roots();
     }
     if roots.is_empty()
         && let Some(music) = dirs::audio_dir()
@@ -172,7 +116,7 @@ fn main() -> Result<()> {
     if mouse {
         let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
     }
-    let result = run(&mut terminal, &mut app);
+    let result = shell::infrastructure::terminal_runtime::run(&mut terminal, &mut app);
     if mouse {
         let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     }
@@ -194,8 +138,8 @@ mod cli_tests {
         let other = dir.join("image.png");
         std::fs::write(&other, b"not audio").unwrap();
         assert_eq!(requested_track(&[]), None);
-        assert_eq!(requested_track(&[dir.clone()]), None);
-        assert_eq!(requested_track(&[other.clone()]), None);
+        assert_eq!(requested_track(std::slice::from_ref(&dir)), None);
+        assert_eq!(requested_track(std::slice::from_ref(&other)), None);
         assert_eq!(
             requested_track(&[other, first.clone(), second]),
             Some(first)
