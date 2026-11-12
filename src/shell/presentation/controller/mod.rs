@@ -302,6 +302,7 @@ pub struct App {
     cover_file: Option<PathBuf>,
     cover_serial: u64,
     media: Option<Media>,
+    pub control: Option<crate::shell::infrastructure::control::Server>,
     cover_for: Option<PathBuf>,
     pub album: String,
     roots: Vec<PathBuf>,
@@ -501,6 +502,7 @@ impl App {
             cover_file: None,
             cover_serial: 0,
             media: Media::start(),
+            control: None,
             album: String::new(),
             watcher: library_store::watch(&roots),
             roots,
@@ -617,6 +619,7 @@ impl App {
             self.browser_cover = cover;
             self.browser_cover_rx = None;
         }
+        self.serve_control();
         self.expire_status();
         self.check_sleep();
         self.autosave();
@@ -1061,6 +1064,67 @@ impl App {
             self.saved_at = Instant::now();
             self.state_service.save(&self.snapshot_state());
         }
+    }
+
+    #[cfg(unix)]
+    fn serve_control(&mut self) {
+        let mut pending = Vec::new();
+        if let Some(server) = &self.control {
+            while let Ok(request) = server.requests.try_recv() {
+                pending.push(request);
+            }
+        }
+        for request in pending {
+            let reply = self.answer_control(&request.line);
+            let _ = request.reply.send(reply);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn serve_control(&mut self) {}
+
+    #[cfg(unix)]
+    fn answer_control(&mut self, line: &str) -> crate::shell::infrastructure::control::Reply {
+        use crate::shell::infrastructure::control::Reply;
+        if line.trim() == "status" {
+            return Reply {
+                ok: true,
+                text: self.status_json(),
+            };
+        }
+        self.status.clear();
+        self.status_is_error = false;
+        self.run_command(line);
+        Reply {
+            ok: !self.status_is_error,
+            text: self.status.clone(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn status_json(&self) -> String {
+        let info = self.media_info();
+        let state = if info.stopped {
+            "stopped"
+        } else if info.playing {
+            "playing"
+        } else {
+            "paused"
+        };
+        let seconds = |d: Duration| (d.as_secs_f64() * 10.0).round() / 10.0;
+        serde_json::json!({
+            "state": state,
+            "title": info.title,
+            "artist": info.artist,
+            "album": info.album,
+            "position": seconds(info.position),
+            "duration": info.duration.map(seconds),
+            "volume": (self.volume() * 100.0).round(),
+            "muted": self.muted,
+            "shuffle": self.shuffle,
+            "repeat": self.repeat.label(),
+        })
+        .to_string()
     }
 
     fn media_info(&self) -> media::Info {

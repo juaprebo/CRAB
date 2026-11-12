@@ -5,7 +5,7 @@ pub const COMMANDS: &[&str] = &[
     "quit", "help", "sort", "sleep", "eq", "repeat", "shuffle", "volume", "lyrics", "theme", "viz",
     "clock", "reload", "folder", "import", "export", "save", "tab", "play", "pause", "next",
     "prev", "stop", "seek", "queue", "map", "unmap", "reset", "keys", "stats", "fav", "favs",
-    "goto", "find", "add", "mute", "fade", "view", "rename", "language",
+    "goto", "find", "add", "mute", "fade", "view", "rename", "language", "toggle",
 ];
 
 pub fn split(line: &str) -> (String, Vec<String>) {

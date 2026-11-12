@@ -16,6 +16,7 @@ A terminal audio player written in Rust. It plays local files, internet radio an
 - Synced (`.lrc`) and plain lyrics, shown in an overlay
 - Scrobbling to ListenBrainz
 - Media keys and desktop media controls (MPRIS) on Linux
+- A library cache for fast starts and `crab ctl` to control a running player from scripts
 - Playback state (shuffle, repeat, volume, last track and position) restored on the next start
 - English and Spanish interfaces with a saved language selector
 - A `vim` key preset, a `:` command line, keys you can remap and a CPU and memory readout
@@ -233,6 +234,22 @@ In the `vim` preset a number typed before an action repeats it: `5j` moves five 
 | `:stats` | CPU, memory and uptime of CRAB |
 | `:play`, `:pause`, `:next`, `:prev`, `:stop`, `:queue`, `:lyrics`, `:clock`, `:reload`, `:folder`, `:help`, `:quit` | the matching actions |
 
+### Controlling a running CRAB
+
+`crab ctl` sends a command to the CRAB that is already open, so shell scripts, status bars and global shortcuts can drive it. It accepts every `:` command listed above, plus `toggle` to pause or resume:
+
+    crab ctl next
+    crab ctl volume 60
+    crab ctl seek +10
+    crab ctl play "midnight run"
+    crab ctl toggle
+
+`crab ctl status` prints the current state as JSON (`state`, `title`, `artist`, `album`, `position`, `duration`, `volume`, `muted`, `shuffle` and `repeat`), which is easy to use with `jq`:
+
+    crab ctl status | jq -r '"\(.artist) - \(.title)"'
+
+The exit code is 0 when the command worked and 1 when CRAB is not running or the command failed, with the reason on stderr. The socket is `crab.sock` in `$XDG_RUNTIME_DIR` and is only available to your user. It is not available on Windows.
+
 ### Remapping keys
 
 From inside CRAB, `:map sleep Z` binds an action and saves it. `:map sleep` shows its keys, `:unmap sleep` removes them, and `:reset sleep` goes back to the key of the preset it started from. The first change switches to the `custom` preset, based on the preset you were using.
@@ -255,6 +272,10 @@ The key help (`?`) and the footer always show the keys you have now.
 ### Resource usage
 
 `I` shows or hides the CPU and memory used by CRAB next to the badges of the player (for example `cpu 3% · 41 MB`), and `:stats` prints the detail with the uptime. The CPU is a percentage of one core. The visibility set with `I` is saved immediately and restored on the next start.
+
+### Library cache
+
+CRAB keeps the tags and durations it has read in `~/.cache/crab/library.json` and only reads again the files whose size or modification time changed, so large libraries open quickly after the first scan. The cache can be deleted at any time and is rebuilt automatically.
 
 ### Folder browser
 

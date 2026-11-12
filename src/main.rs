@@ -22,6 +22,7 @@ const HELP: &str = "CRAB - terminal audio player
 Usage:
   crab [PATH...]   Start the player, scanning the given folders or files (default: last used folders, or ~/Music)
   crab login       Sign in to Spotify (Premium account required)
+  crab ctl CMD     Send a command to the CRAB that is open (crab ctl status prints JSON)
   crab --formats   List available audio formats and backends
   crab --version   Show the version
   crab --help      Show this help
@@ -71,6 +72,7 @@ fn main() -> Result<()> {
             println!("crab {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
+        Some("ctl") => std::process::exit(shell::infrastructure::control::run_client(&args[1..])),
         Some("--formats") => {
             shell::presentation::cli::print_formats(language);
             return Ok(());
@@ -107,6 +109,7 @@ fn main() -> Result<()> {
     redirect_stderr();
     let engine = Engine::new()?;
     let mut app = App::new(engine, roots);
+    app.control = shell::infrastructure::control::start();
     if let Some(path) = autoplay {
         app.request_autoplay(path);
     }
