@@ -242,11 +242,12 @@ fn scan_tracks(roots: Vec<PathBuf>, extra: Vec<PathBuf>, sort: SortKey) -> Scan 
         .into_iter()
         .filter(|p| paths.binary_search(p).is_err())
         .collect();
-    let mut tracks = read_tracks(paths);
+    let cache = super::cache::default_path();
+    let mut tracks = super::cache::read_cached(paths, cache.as_deref());
     sort_tracks(&mut tracks, sort);
     Scan {
         tracks,
-        extra: read_tracks(extra),
+        extra: super::cache::read_cached(extra, cache.as_deref()),
     }
 }
 
