@@ -14,7 +14,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config ffmpeg
+        timeout-minutes: 10
+        run: |
+          apt_options=(
+            -o Acquire::Retries=3
+            -o Acquire::http::Timeout=20
+            -o Acquire::https::Timeout=20
+          )
+          sudo apt-get "${apt_options[@]}" update --error-on=any
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends libasound2-dev pkg-config ffmpeg
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
