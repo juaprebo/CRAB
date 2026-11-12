@@ -97,6 +97,20 @@ fn main() -> Result<()> {
 
     let mut roots: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
     let autoplay = requested_track(&roots);
+    if !roots.is_empty()
+        && roots
+            .iter()
+            .all(|path| path.is_file() && library_store::is_audio(path))
+        && settings::infrastructure::config::single_instance_enabled()
+    {
+        let files: Vec<PathBuf> = roots
+            .iter()
+            .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+            .collect();
+        if shell::infrastructure::control::open_in_running(&files) {
+            return Ok(());
+        }
+    }
     if roots.is_empty() {
         roots = library_store::load_saved_roots();
     }

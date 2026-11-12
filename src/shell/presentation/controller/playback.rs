@@ -341,6 +341,29 @@ impl App {
         }
     }
 
+    pub(super) fn open_files(&mut self, args: &[String]) {
+        let paths: Vec<PathBuf> = args
+            .iter()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file() && library_store::is_audio(path))
+            .collect();
+        if paths.is_empty() {
+            self.set_status(tr(self.config.language, "No audio file to open"), true);
+            return;
+        }
+        if let [path] = paths.as_slice()
+            && let Some(index) = self.tracks.iter().position(|track| &track.path == path)
+        {
+            self.tab = Tab::Library;
+            self.play_local(index);
+            return;
+        }
+        self.queue = paths.iter().map(|path| self.resolve_track(path)).collect();
+        self.queue_name = tr(self.config.language, "Opened files").to_string();
+        self.queue_is_playlist = false;
+        self.play_queue(0);
+    }
+
     pub(super) fn play_queue(&mut self, index: usize) -> bool {
         let Some(track) = self.queue.get(index).cloned() else {
             return false;

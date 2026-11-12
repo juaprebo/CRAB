@@ -64,7 +64,7 @@ Spotify support is a Cargo feature that is on by default. Pass `SPOTIFY=0` to `m
     crab --version
     crab --help
 
-Without arguments CRAB opens the folders you used last time, or `~/Music` the first time. Passing an audio file, including by double-clicking it in the file manager, starts that file automatically from the beginning after scanning. Passing only folders does not start playback.
+Without arguments CRAB opens the folders you used last time, or `~/Music` the first time. Passing an audio file, including by double-clicking it in the file manager, starts that file automatically from the beginning after scanning. Passing only folders does not start playback. When CRAB is already open (Linux and macOS), audio files passed on the command line or opened from the file manager play in that window and the new process exits at once, so double-clicking a song never starts a second player. Set `single_instance = false` in `config.toml` to always start a new one. Only audio files are forwarded; passing a folder always starts a new CRAB. The same thing is available as `crab ctl open FILE...`.
 
 | Key | Action |
 | --- | --- |

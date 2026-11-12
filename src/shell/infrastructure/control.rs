@@ -120,6 +120,45 @@ mod imp {
 #[cfg(unix)]
 pub use imp::{Server, call, start};
 
+pub fn quote_arg(arg: &str) -> String {
+    if arg.is_empty() || arg.contains(|c: char| c.is_whitespace() || c == '"' || c == '\\') {
+        format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        arg.to_string()
+    }
+}
+
+pub fn command_line(args: &[String]) -> String {
+    let opens = args.first().is_some_and(|name| name == "open");
+    let mut line = String::new();
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            line.push(' ');
+        }
+        if index == 0 {
+            line.push_str(arg);
+        } else if opens {
+            let absolute = std::fs::canonicalize(arg).unwrap_or_else(|_| arg.into());
+            line.push_str(&quote_arg(&absolute.to_string_lossy()));
+        } else {
+            line.push_str(&quote_arg(arg));
+        }
+    }
+    line
+}
+
+#[cfg(unix)]
+pub fn open_in_running(files: &[std::path::PathBuf]) -> bool {
+    let mut args = vec!["open".to_string()];
+    args.extend(files.iter().map(|f| f.to_string_lossy().into_owned()));
+    matches!(call(&command_line(&args)), Ok(reply) if reply.ok)
+}
+
+#[cfg(not(unix))]
+pub fn open_in_running(_files: &[std::path::PathBuf]) -> bool {
+    false
+}
+
 #[cfg(unix)]
 pub fn run_client(args: &[String]) -> i32 {
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help") {
@@ -129,7 +168,7 @@ pub fn run_client(args: &[String]) -> i32 {
         println!("  crab ctl status      prints the current state as JSON");
         return if args.is_empty() { 1 } else { 0 };
     }
-    match call(&args.join(" ")) {
+    match call(&command_line(args)) {
         Ok(reply) if reply.ok => {
             if !reply.text.is_empty() {
                 println!("{}", reply.text);
@@ -173,6 +212,17 @@ pub fn run_client(_args: &[String]) -> i32 {
 mod tests {
     use super::imp::*;
     use super::*;
+
+    #[test]
+    fn quotes_arguments_with_spaces() {
+        assert_eq!(quote_arg("plain"), "plain");
+        assert_eq!(quote_arg("two words"), "\"two words\"");
+        assert_eq!(quote_arg("a\"b"), "\"a\\\"b\"");
+        assert_eq!(
+            command_line(&["play".into(), "midnight run".into()]),
+            "play \"midnight run\""
+        );
+    }
 
     #[test]
     fn serves_requests_and_reports_errors() {

@@ -771,6 +771,7 @@ impl App {
                 None => self.set_status(tr(self.config.language, "No track matches"), true),
             },
             "toggle" => self.toggle_pause(),
+            "open" => self.open_files(&args),
             "play" => {
                 if !self.is_playing() {
                     self.toggle_pause();

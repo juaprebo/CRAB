@@ -368,5 +368,7 @@
   "FFmpeg fallback: {status}": "FFmpeg fallback: {status}",
   "Container support depends on the audio codec inside. FFmpeg support depends on its installed decoders.": "Container support depends on the audio codec inside. FFmpeg support depends on its installed decoders.",
   "CRAB uses {cpu}% of one core and {memory} of memory, running for {uptime}": "CRAB uses {cpu}% of one core and {memory} of memory, running for {uptime}",
-  "Station search failed: {error}": "Station search failed: {error}"
+  "Station search failed: {error}": "Station search failed: {error}",
+  "No audio file to open": "No audio file to open",
+  "Opened files": "Opened files"
 }

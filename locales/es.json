@@ -368,5 +368,7 @@
   "FFmpeg fallback: {status}": "FFmpeg como alternativa: {status}",
   "Container support depends on the audio codec inside. FFmpeg support depends on its installed decoders.": "La compatibilidad con un contenedor depende del códec de audio que contiene. La compatibilidad de FFmpeg depende de los decodificadores instalados.",
   "CRAB uses {cpu}% of one core and {memory} of memory, running for {uptime}": "CRAB usa el {cpu}% de un núcleo y {memory} de memoria; tiempo activo: {uptime}",
-  "Station search failed: {error}": "Ha fallado la búsqueda de emisoras: {error}"
+  "Station search failed: {error}": "Ha fallado la búsqueda de emisoras: {error}",
+  "No audio file to open": "No hay ningún archivo de audio que abrir",
+  "Opened files": "Archivos abiertos"
 }

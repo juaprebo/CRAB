@@ -5,11 +5,43 @@ pub const COMMANDS: &[&str] = &[
     "quit", "help", "sort", "sleep", "eq", "repeat", "shuffle", "volume", "lyrics", "theme", "viz",
     "clock", "reload", "folder", "import", "export", "save", "tab", "play", "pause", "next",
     "prev", "stop", "seek", "queue", "map", "unmap", "reset", "keys", "stats", "fav", "favs",
-    "goto", "find", "add", "mute", "fade", "view", "rename", "language", "toggle",
+    "goto", "find", "add", "mute", "fade", "view", "rename", "language", "toggle", "open",
 ];
 
 pub fn split(line: &str) -> (String, Vec<String>) {
-    let mut parts = line.split_whitespace().map(str::to_string);
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut quoted = false;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            '\\' if quoted => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                    started = true;
+                }
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    words.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(current);
+    }
+    let mut parts = words.into_iter();
     let name = parts.next().unwrap_or_default();
     (name, parts.collect())
 }
@@ -136,6 +168,9 @@ mod tests {
         assert_eq!(args, ["80"]);
         assert_eq!(canonical("Q"), Some("quit"));
         assert_eq!(canonical("nope"), None);
+        let (name, args) = split(r#"open "/music/My Song.mp3" plain "a \"b\"""#);
+        assert_eq!(name, "open");
+        assert_eq!(args, ["/music/My Song.mp3", "plain", "a \"b\""]);
     }
 
     #[test]

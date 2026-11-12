@@ -22,6 +22,7 @@ theme = "crab"
 show_art = true
 art_strength = 0.35
 mouse = true
+single_instance = true
 
 [visualizer]
 style = "bars"
@@ -196,6 +197,7 @@ pub struct Config {
     pub art_file: Option<String>,
     pub art_strength: f32,
     pub mouse: bool,
+    pub single_instance: bool,
     pub visualizer: VisualizerConfig,
     pub clock: ClockConfig,
     pub library: LibraryConfig,
@@ -214,6 +216,7 @@ impl Default for Config {
             art_file: None,
             art_strength: 0.35,
             mouse: true,
+            single_instance: true,
             visualizer: VisualizerConfig::default(),
             clock: ClockConfig::default(),
             library: LibraryConfig::default(),
@@ -223,6 +226,26 @@ impl Default for Config {
             themes: BTreeMap::new(),
         }
     }
+}
+
+pub fn single_instance_enabled() -> bool {
+    #[derive(Deserialize)]
+    #[serde(default)]
+    struct Preference {
+        single_instance: bool,
+    }
+    impl Default for Preference {
+        fn default() -> Self {
+            Self {
+                single_instance: true,
+            }
+        }
+    }
+    config_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| toml::from_str::<Preference>(&text).ok())
+        .unwrap_or_default()
+        .single_instance
 }
 
 pub fn configured_language() -> crate::localization::domain::language::Language {
